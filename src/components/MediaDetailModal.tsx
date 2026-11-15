@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Calendar,
   Check,
   ChevronRight,
   Link2,
@@ -21,6 +22,7 @@ import type {
 } from "@/lib/types";
 import {
   formatAbsoluteTimePt,
+  formatReleaseDatePt,
   formatTimecode,
   getAppMeta,
   getMediaTypeLabelPt,
@@ -41,6 +43,7 @@ interface MediaDetailModalProps {
     payload: MediaPatchAction
   ) => Promise<MediaItem | null>;
   onDeleteMedia: (mediaId: string) => Promise<boolean>;
+  onEpisodesUpdated?: (mediaId: string, episodes: CatalogEpisode[]) => void;
 }
 
 const STATUS_OPTIONS: WatchStatus[] = [
@@ -71,12 +74,21 @@ function MediaDetailModalInner({
   onClose,
   onPatchMedia,
   onDeleteMedia,
+  onEpisodesUpdated,
 }: MediaDetailModalInnerProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const initialCachedEpisodes = Array.isArray(media.catalog_episodes)
+    ? media.catalog_episodes
+    : [];
 
   const [activeTab, setActiveTab] = useState<DetailModalTab>(initialTab);
-  const [episodes, setEpisodes] = useState<CatalogEpisode[]>([]);
-  const [epLoading, setEpLoading] = useState(true);
+  const [episodes, setEpisodes] = useState<CatalogEpisode[]>(
+    initialCachedEpisodes
+  );
+  const [epLoading, setEpLoading] = useState(
+    initialCachedEpisodes.length === 0
+  );
+  const [epRefreshing, setEpRefreshing] = useState(false);
   const [epError, setEpError] = useState<string | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<number | "all">("all");
   const [togglingKey, setTogglingKey] = useState<string | null>(null);
@@ -103,26 +115,41 @@ function MediaDetailModalInner({
 
   useDialogAccessibility(true, dialogRef, onClose);
 
-  const loadEpisodes = useCallback(async (mediaId: string) => {
-    setEpLoading(true);
-    setEpError(null);
-    try {
-      const res = await fetch(`/api/media/${mediaId}/episodes`, {
-        cache: "no-store",
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Não foi possível carregar episódios.");
+  const loadEpisodes = useCallback(
+    async (mediaId: string, forceRefresh = false) => {
+      if (forceRefresh) {
+        setEpRefreshing(true);
+      } else {
+        setEpLoading(true);
       }
-      setEpisodes(Array.isArray(data.episodes) ? data.episodes : []);
-    } catch (err) {
-      setEpError(
-        err instanceof Error ? err.message : "Erro ao buscar lista de episódios."
-      );
-    } finally {
-      setEpLoading(false);
-    }
-  }, []);
+      setEpError(null);
+      try {
+        const url = forceRefresh
+          ? `/api/media/${mediaId}/episodes?refresh=1`
+          : `/api/media/${mediaId}/episodes`;
+        const res = await fetch(url, {
+          cache: "no-store",
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || "Não foi possível carregar episódios.");
+        }
+        const nextList = Array.isArray(data.episodes) ? data.episodes : [];
+        setEpisodes(nextList);
+        onEpisodesUpdated?.(mediaId, nextList);
+      } catch (err) {
+        setEpError(
+          err instanceof Error
+            ? err.message
+            : "Erro ao buscar lista de episódios."
+        );
+      } finally {
+        setEpLoading(false);
+        setEpRefreshing(false);
+      }
+    },
+    [onEpisodesUpdated]
+  );
 
   const runRematchSearch = useCallback(
     async (query: string, type: "all" | "anime" | "series") => {
@@ -154,29 +181,39 @@ function MediaDetailModalInner({
 
   useEffect(() => {
     let active = true;
-    fetch(`/api/media/${media.id}/episodes`, { cache: "no-store" })
-      .then(async (res) => {
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || "Não foi possível carregar episódios.");
-        }
-        if (active) {
-          setEpisodes(Array.isArray(data.episodes) ? data.episodes : []);
-          setEpError(null);
-        }
-      })
-      .catch((err) => {
-        if (active) {
-          setEpError(
-            err instanceof Error
-              ? err.message
-              : "Erro ao buscar lista de episódios."
-          );
-        }
-      })
-      .finally(() => {
-        if (active) setEpLoading(false);
-      });
+    const hasCached =
+      Array.isArray(media.catalog_episodes) &&
+      media.catalog_episodes.length > 0;
+
+    if (!hasCached) {
+      fetch(`/api/media/${media.id}/episodes`, { cache: "no-store" })
+        .then(async (res) => {
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(
+              data.error || "Não foi possível carregar episódios."
+            );
+          }
+          if (active) {
+            const nextList = Array.isArray(data.episodes) ? data.episodes : [];
+            setEpisodes(nextList);
+            setEpError(null);
+            onEpisodesUpdated?.(media.id, nextList);
+          }
+        })
+        .catch((err) => {
+          if (active) {
+            setEpError(
+              err instanceof Error
+                ? err.message
+                : "Erro ao buscar lista de episódios."
+            );
+          }
+        })
+        .finally(() => {
+          if (active) setEpLoading(false);
+        });
+    }
 
     if (initialTab === "rematch") {
       const typeParam = media.media_type === "anime" ? "anime" : "series";
@@ -207,7 +244,14 @@ function MediaDetailModalInner({
     return () => {
       active = false;
     };
-  }, [media.id, media.title, media.media_type, initialTab]);
+  }, [
+    media.id,
+    media.title,
+    media.media_type,
+    media.catalog_episodes,
+    initialTab,
+    onEpisodesUpdated,
+  ]);
 
   const seasons = useMemo(() => {
     const set = new Set<number>();
@@ -221,15 +265,17 @@ function MediaDetailModalInner({
   }, [episodes, selectedSeason]);
 
   const nextEpisode = useMemo(() => {
-    if (!media) return null;
-    const firstUnwatchedAfterCurrent = episodes.find(
-      (ep) => !ep.watched && ep.episode > media.current_episode
+    const releasedUnwatchedAfterCurrent = episodes.find(
+      (ep) =>
+        !ep.watched && !ep.is_upcoming && ep.episode > media.current_episode
     );
-    if (firstUnwatchedAfterCurrent) return firstUnwatchedAfterCurrent;
-    const anyUnwatched = episodes.find((ep) => !ep.watched);
-    if (anyUnwatched) return anyUnwatched;
+    if (releasedUnwatchedAfterCurrent) return releasedUnwatchedAfterCurrent;
+    const anyReleasedUnwatched = episodes.find(
+      (ep) => !ep.watched && !ep.is_upcoming
+    );
+    if (anyReleasedUnwatched) return anyReleasedUnwatched;
     return null;
-  }, [episodes, media]);
+  }, [episodes, media.current_episode]);
 
   if (!media) return null;
 
@@ -300,7 +346,7 @@ function MediaDetailModalInner({
     setRematchingId(null);
     if (updated) {
       setActiveTab("episodes");
-      await loadEpisodes(media.id);
+      await loadEpisodes(media.id, true);
     }
   };
 
@@ -563,36 +609,69 @@ function MediaDetailModalInner({
                 </div>
               )}
 
-              {seasons.length > 1 && (
-                <div
-                  className="flex flex-wrap gap-2"
-                  aria-label="Filtrar por temporada"
-                >
-                  <button
-                    type="button"
-                    onClick={() => setSelectedSeason("all")}
-                    className={`min-h-[44px] rounded-lg px-3 py-1.5 text-xs font-semibold ${
-                      selectedSeason === "all"
-                        ? "bg-[#F47521] text-[#0B0C10]"
-                        : "border border-[#262A38] bg-[#1B1E28] text-[#A8B0C2] hover:text-[#F4F5F7]"
-                    }`}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                {seasons.length > 1 ? (
+                  <div
+                    className="flex flex-wrap gap-2"
+                    aria-label="Filtrar por temporada"
                   >
-                    Todas ({episodes.length})
-                  </button>
-                  {seasons.map((s) => (
                     <button
-                      key={s}
                       type="button"
-                      onClick={() => setSelectedSeason(s)}
-                      className={`min-h-[44px] rounded-lg px-3 py-1.5 font-mono text-xs font-semibold ${
-                        selectedSeason === s
+                      onClick={() => setSelectedSeason("all")}
+                      className={`min-h-[44px] rounded-lg px-3 py-1.5 text-xs font-semibold ${
+                        selectedSeason === "all"
                           ? "bg-[#F47521] text-[#0B0C10]"
                           : "border border-[#262A38] bg-[#1B1E28] text-[#A8B0C2] hover:text-[#F4F5F7]"
                       }`}
                     >
-                      Temp {s}
+                      Todas ({episodes.length})
                     </button>
-                  ))}
+                    {seasons.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setSelectedSeason(s)}
+                        className={`min-h-[44px] rounded-lg px-3 py-1.5 font-mono text-xs font-semibold ${
+                          selectedSeason === s
+                            ? "bg-[#F47521] text-[#0B0C10]"
+                            : "border border-[#262A38] bg-[#1B1E28] text-[#A8B0C2] hover:text-[#F4F5F7]"
+                        }`}
+                      >
+                        Temp {s}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-xs font-semibold text-[#A8B0C2]">
+                    {episodes.length > 0
+                      ? `${episodes.length} episódio(s) no catálogo`
+                      : "Catálogo de episódios"}
+                  </span>
+                )}
+
+                <button
+                  type="button"
+                  disabled={epRefreshing || epLoading}
+                  onClick={() => void loadEpisodes(media.id, true)}
+                  className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#373D52] bg-[#1B1E28] px-3 py-1.5 text-xs font-semibold text-[#F4F5F7] hover:bg-[#262A38] disabled:opacity-60"
+                >
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 ${epRefreshing ? "animate-spin" : ""}`}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {epRefreshing ? "Atualizando..." : "Atualizar Catálogo"}
+                  </span>
+                </button>
+              </div>
+
+              {media.next_airing && (
+                <div className="flex items-center gap-2 rounded-xl border border-[#FCD34D]/35 bg-[#0B0C10]/70 px-3.5 py-2.5 text-xs font-semibold text-[#FCD34D]">
+                  <Calendar className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>
+                    Próximo lançamento: Episódio {media.next_airing.episode} em{" "}
+                    {formatReleaseDatePt(media.next_airing.airing_at, true)}
+                  </span>
                 </div>
               )}
 
@@ -693,6 +772,14 @@ function MediaDetailModalInner({
                                     Próximo
                                   </span>
                                 )}
+                                {ep.is_upcoming && (
+                                  <span className="rounded border border-[#FCD34D]/40 bg-[#0B0C10] px-1.5 py-0.5 text-[10px] font-bold text-[#FCD34D]">
+                                    Em breve
+                                    {ep.air_date || ep.aired_at
+                                      ? ` · Lança em ${formatReleaseDatePt(ep.air_date || ep.aired_at)}`
+                                      : ""}
+                                  </span>
+                                )}
                                 {ep.watched && epAppMeta && (
                                   <span
                                     className={`rounded px-1.5 py-0.5 text-[10px] ${epAppMeta.badgeClass}`}
@@ -705,13 +792,19 @@ function MediaDetailModalInner({
                                 {ep.title || `Episódio ${ep.episode}`}
                               </p>
                               {(ep.watched_at ||
+                                ep.air_date ||
+                                ep.aired_at ||
                                 (ep.position_sec != null &&
                                   ep.duration_sec != null &&
                                   ep.duration_sec > 0)) && (
                                 <p className="text-[11px] text-[#A8B0C2]">
                                   {ep.watched_at
                                     ? `Assistido em ${formatAbsoluteTimePt(ep.watched_at)}`
-                                    : ""}
+                                    : (ep.air_date || ep.aired_at) && !ep.is_upcoming
+                                      ? `Lançado em ${formatReleaseDatePt(ep.air_date || ep.aired_at)}`
+                                      : ep.is_upcoming && (ep.air_date || ep.aired_at)
+                                        ? `Previsão: ${formatReleaseDatePt(ep.air_date || ep.aired_at, true)}`
+                                        : ""}
                                   {ep.position_sec != null &&
                                   ep.duration_sec != null &&
                                   ep.duration_sec > 0

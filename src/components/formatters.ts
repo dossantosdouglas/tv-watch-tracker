@@ -146,3 +146,42 @@ export function stripHtml(raw: string | null | undefined): string {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+export function formatReleaseDatePt(
+  isoDate: string | null | undefined,
+  includeTime = false
+): string {
+  if (!isoDate) return "";
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(isoDate.trim());
+  const date = new Date(
+    isDateOnly ? `${isoDate.trim()}T12:00:00Z` : isoDate
+  );
+  if (Number.isNaN(date.getTime())) return "";
+
+  const datePart = date.toLocaleDateString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+  });
+
+  if (!includeTime || isDateOnly) {
+    return datePart;
+  }
+
+  const timePart = date.toLocaleTimeString("pt-BR", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `${datePart} às ${timePart}`;
+}
+
+export function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const buffer = new ArrayBuffer(rawData.length);
+  const outputArray = new Uint8Array(buffer);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}

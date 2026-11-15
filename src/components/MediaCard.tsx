@@ -1,9 +1,10 @@
 "use client";
 
-import { ListVideo, Plus } from "lucide-react";
+import { Calendar, ListVideo, Plus } from "lucide-react";
 import type { MediaItem } from "@/lib/types";
 import {
   formatRelativeTimePt,
+  formatReleaseDatePt,
   getAppMeta,
   getMediaTypeLabelPt,
   getProgressPercent,
@@ -106,6 +107,16 @@ export function MediaCard({
             {item.last_episode_title && (
               <p className="truncate text-xs text-[#A8B0C2]">
                 {item.last_episode_title}
+              </p>
+            )}
+
+            {item.next_airing && (
+              <p className="inline-flex max-w-full items-center gap-1.5 truncate rounded-md border border-[#FCD34D]/30 bg-[#0B0C10]/80 px-2 py-1 font-mono text-[11px] font-semibold text-[#FCD34D]">
+                <Calendar className="h-3 w-3 shrink-0" aria-hidden="true" />
+                <span className="truncate">
+                  Próx. Ep {item.next_airing.episode}:{" "}
+                  {formatReleaseDatePt(item.next_airing.airing_at, true)}
+                </span>
               </p>
             )}
 

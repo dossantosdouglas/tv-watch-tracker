@@ -55,7 +55,8 @@ object ScrobbleReporter {
     @Synchronized
     fun report(context: Context, event: WatchEvent) {
         val cleanTitle = event.title.trim()
-        if (cleanTitle.isEmpty()) return
+        if (event.app != "crunchyroll" || cleanTitle.isEmpty()) return
+        if (event.episode == null || event.episode <= 0) return
 
         val now = System.currentTimeMillis()
         val key = buildDebounceKey(event)

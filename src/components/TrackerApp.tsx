@@ -4,11 +4,14 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
+import { createClient } from "@supabase/supabase-js";
 import { RefreshCw, Search, X } from "lucide-react";
 import type {
+  CatalogEpisode,
   MediaItem,
   MediaPatchAction,
   MediaType,
@@ -21,6 +24,7 @@ import { HeaderBar } from "./HeaderBar";
 import { HeroSpotlight } from "./HeroSpotlight";
 import { MediaCard } from "./MediaCard";
 import { type DetailModalTab, MediaDetailModal } from "./MediaDetailModal";
+import { NotificationsModal } from "./NotificationsModal";
 import { PinModal } from "./PinModal";
 import { TvSignalDrawer } from "./TvSignalDrawer";
 
@@ -35,7 +39,7 @@ interface MediaStats {
 }
 
 const PIN_STORAGE_KEY = "tv_tracker_pin";
-const POLL_INTERVAL_MS = 15000;
+const VISIBILITY_THROTTLE_MS = 30000;
 
 const pinListeners = new Set<() => void>();
 
@@ -102,6 +106,10 @@ export function TrackerApp() {
 
   const [addModalOpen, setAddModalOpen] = useState<boolean>(false);
   const [signalDrawerOpen, setSignalDrawerOpen] = useState<boolean>(false);
+  const [notificationsModalOpen, setNotificationsModalOpen] =
+    useState<boolean>(false);
+  const [pushSubscribed, setPushSubscribed] = useState<boolean>(false);
+  const lastFetchTsRef = useRef<number>(0);
 
   const [detailMediaId, setDetailMediaId] = useState<string | null>(null);
   const [detailInitialTab, setDetailInitialTab] =
@@ -152,7 +160,9 @@ export function TrackerApp() {
         setHasLiveSignal(false);
       }
       setError(null);
-      setLastSyncAt(new Date().toISOString());
+      const nowIso = new Date().toISOString();
+      lastFetchTsRef.current = Date.now();
+      setLastSyncAt(nowIso);
     },
     []
   );
@@ -183,6 +193,7 @@ export function TrackerApp() {
 
   useEffect(() => {
     let active = true;
+    let realtimeTimer: number | null = null;
 
     const load = () => {
       fetch("/api/media", { cache: "no-store" })
@@ -208,10 +219,64 @@ export function TrackerApp() {
     };
 
     load();
-    const interval = window.setInterval(load, POLL_INTERVAL_MS);
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastFetchTsRef.current >= VISIBILITY_THROTTLE_MS) {
+        load();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    if (
+      typeof navigator !== "undefined" &&
+      "serviceWorker" in navigator &&
+      "PushManager" in window
+    ) {
+      navigator.serviceWorker
+        .getRegistration("/sw.js")
+        .then((reg) => reg?.pushManager.getSubscription())
+        .then((sub) => {
+          if (active) setPushSubscribed(Boolean(sub));
+        })
+        .catch(() => {
+          // ignore service worker check failures
+        });
+    }
+
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    let realtimeClient: ReturnType<typeof createClient> | null = null;
+    let realtimeChannel: ReturnType<
+      ReturnType<typeof createClient>["channel"]
+    > | null = null;
+
+    if (supabaseUrl && supabaseAnonKey) {
+      realtimeClient = createClient(supabaseUrl, supabaseAnonKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+      realtimeChannel = realtimeClient
+        .channel("tv-watch-media-updates")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "tv_watch_media" },
+          () => {
+            if (realtimeTimer !== null) window.clearTimeout(realtimeTimer);
+            realtimeTimer = window.setTimeout(() => {
+              if (active) load();
+            }, 600);
+          }
+        )
+        .subscribe();
+    }
+
     return () => {
       active = false;
-      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (realtimeTimer !== null) window.clearTimeout(realtimeTimer);
+      if (realtimeClient && realtimeChannel) {
+        void realtimeClient.removeChannel(realtimeChannel);
+      }
     };
   }, [applyTrackerResponse]);
 
@@ -476,6 +541,32 @@ export function TrackerApp() {
     return media.find((m) => m.id === detailMediaId) || null;
   }, [media, detailMediaId]);
 
+  const hasMixedTypes = useMemo(() => {
+    return media.some((m) => m.media_type !== "anime");
+  }, [media]);
+
+  const handleEpisodesUpdated = useCallback(
+    (mediaId: string, episodes: CatalogEpisode[]) => {
+      setMedia((prev) =>
+        prev.map((m) =>
+          m.id === mediaId ? { ...m, catalog_episodes: episodes } : m
+        )
+      );
+    },
+    []
+  );
+
+  const handleLogsPolled = useCallback((nextLogs: ScrobbleLog[]) => {
+    setLogs(nextLogs);
+    setLastSyncAt(new Date().toISOString());
+    if (nextLogs.length > 0) {
+      const latest = new Date(nextLogs[0].created_at).getTime();
+      setHasLiveSignal(
+        Number.isFinite(latest) && Date.now() - latest < 15 * 60 * 1000
+      );
+    }
+  }, []);
+
   const openDetail = (item: MediaItem, tab: DetailModalTab = "episodes") => {
     setDetailInitialTab(tab);
     setDetailMediaId(item.id);
@@ -491,8 +582,10 @@ export function TrackerApp() {
         hasPin={Boolean(pin)}
         pinRequired={pinRequired}
         hasLiveSignal={hasLiveSignal}
+        pushSubscribed={pushSubscribed}
         logsCount={logs.length}
         onOpenSignalDrawer={() => setSignalDrawerOpen(true)}
+        onOpenNotificationsModal={() => setNotificationsModalOpen(true)}
         onOpenPinModal={() => {
           setPinReason(null);
           setPinModalOpen(true);
@@ -629,36 +722,38 @@ export function TrackerApp() {
               })}
             </div>
 
-            <div
-              role="group"
-              aria-label="Filtrar por tipo de mídia"
-              className="flex flex-wrap gap-2"
-            >
-              {(
-                [
-                  { id: "all", label: "Todos" },
-                  { id: "anime", label: "Animes" },
-                  { id: "series_movie", label: "Séries & Filmes" },
-                ] as const
-              ).map((t) => {
-                const active = typeFilter === t.id;
-                return (
-                  <button
-                    key={t.id}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() => setTypeFilter(t.id)}
-                    className={`min-h-[44px] rounded-xl border px-3 py-2 text-xs font-semibold transition-colors ${
-                      active
-                        ? "border-[#F47521] bg-[#1B1E28] text-[#FF9248]"
-                        : "border-[#262A38] bg-[#13151C] text-[#A8B0C2] hover:border-[#373D52] hover:text-[#F4F5F7]"
-                    }`}
-                  >
-                    {t.label}
-                  </button>
-                );
-              })}
-            </div>
+            {hasMixedTypes && (
+              <div
+                role="group"
+                aria-label="Filtrar por tipo de mídia"
+                className="flex flex-wrap gap-2"
+              >
+                {(
+                  [
+                    { id: "all", label: "Todos" },
+                    { id: "anime", label: "Animes" },
+                    { id: "series_movie", label: "Séries & Filmes" },
+                  ] as const
+                ).map((t) => {
+                  const active = typeFilter === t.id;
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setTypeFilter(t.id)}
+                      className={`min-h-[44px] rounded-xl border px-3 py-2 text-xs font-semibold transition-colors ${
+                        active
+                          ? "border-[#F47521] bg-[#1B1E28] text-[#FF9248]"
+                          : "border-[#262A38] bg-[#13151C] text-[#A8B0C2] hover:border-[#373D52] hover:text-[#F4F5F7]"
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {loading ? (
@@ -724,10 +819,16 @@ export function TrackerApp() {
       <footer className="border-t border-[#262A38] bg-[#0B0C10] py-5">
         <div className="mx-auto flex max-w-7xl flex-col items-start justify-between gap-2 px-4 text-xs text-[#A8B0C2] sm:flex-row sm:items-center sm:px-6">
           <p>
-            Onde Parei · Sincronização automática da Smart TV (Crunchyroll e
-            YouCine)
+            Onde Parei · Sincronização em tempo real com Crunchyroll na Smart TV
           </p>
           <div className="flex flex-wrap gap-4">
+            <button
+              type="button"
+              onClick={() => setNotificationsModalOpen(true)}
+              className="min-h-[44px] font-medium text-[#A8B0C2] underline-offset-4 hover:text-[#F4F5F7] hover:underline"
+            >
+              Notificações
+            </button>
             <button
               type="button"
               onClick={() => setSignalDrawerOpen(true)}
@@ -752,6 +853,7 @@ export function TrackerApp() {
         onClose={() => setDetailMediaId(null)}
         onPatchMedia={handlePatchMedia}
         onDeleteMedia={handleDeleteMedia}
+        onEpisodesUpdated={handleEpisodesUpdated}
       />
 
       <AddMediaModal
@@ -767,7 +869,17 @@ export function TrackerApp() {
         lastSyncAt={lastSyncAt}
         refreshing={refreshing}
         onRefresh={() => void fetchTrackerData(true)}
+        onLogsPolled={handleLogsPolled}
         onClose={() => setSignalDrawerOpen(false)}
+      />
+
+      <NotificationsModal
+        isOpen={notificationsModalOpen}
+        pin={pin}
+        onSubscriptionChange={setPushSubscribed}
+        onUnauthorized={handleUnauthorized}
+        onToast={showToast}
+        onClose={() => setNotificationsModalOpen(false)}
       />
 
       <PinModal

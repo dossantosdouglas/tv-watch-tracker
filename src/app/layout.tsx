@@ -15,9 +15,9 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Onde Parei · Tracker de TV e Animes",
+  title: "Onde Parei · Tracker de Animes e Smart TV",
   description:
-    "Acompanhe automaticamente seus episódios da Smart TV (Crunchyroll e YouCine) em um painel rápido feito para celular e desktop.",
+    "Acompanhe automaticamente seus episódios do Crunchyroll na Smart TV e lançamentos de animes em um painel rápido.",
 };
 
 export const viewport: Viewport = {

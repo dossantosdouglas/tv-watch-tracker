@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { Radio, RefreshCw, Tv, X } from "lucide-react";
 import type { ScrobbleLog } from "@/lib/types";
 import {
@@ -17,6 +17,7 @@ interface TvSignalDrawerProps {
   lastSyncAt: string | null;
   refreshing: boolean;
   onRefresh: () => void;
+  onLogsPolled: (logs: ScrobbleLog[]) => void;
   onClose: () => void;
 }
 
@@ -26,10 +27,37 @@ export function TvSignalDrawer({
   lastSyncAt,
   refreshing,
   onRefresh,
+  onLogsPolled,
   onClose,
 }: TvSignalDrawerProps) {
   const drawerRef = useRef<HTMLDivElement>(null);
   useDialogAccessibility(isOpen, drawerRef, onClose);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+
+    const pollLogs = () => {
+      fetch("/api/scrobble", { cache: "no-store" })
+        .then(async (res) => {
+          if (!res.ok) return;
+          const data = await res.json();
+          if (active && Array.isArray(data.logs)) {
+            onLogsPolled(data.logs);
+          }
+        })
+        .catch(() => {
+          // ignore transient polling errors while drawer is open
+        });
+    };
+
+    pollLogs();
+    const interval = window.setInterval(pollLogs, 8000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [isOpen, onLogsPolled]);
 
   if (!isOpen) return null;
 
@@ -61,9 +89,9 @@ export function TvSignalDrawer({
                 Sinal da TV (Ao Vivo)
               </h2>
               <p className="text-xs text-[#A8B0C2]">
-                Atualização automática a cada 15s
+                Monitoramento ativo enquanto este painel está aberto
                 {lastSyncAt
-                  ? ` · Última checagem: ${formatRelativeTimePt(lastSyncAt)}`
+                  ? ` · Sincronizado ${formatRelativeTimePt(lastSyncAt)}`
                   : ""}
               </p>
             </div>
@@ -105,9 +133,8 @@ export function TvSignalDrawer({
                 Nenhum sinal recebido da TV ainda
               </p>
               <p className="mt-1 text-xs leading-relaxed text-[#A8B0C2]">
-                Quando o app na Smart TV detectar reprodução no Crunchyroll ou
-                no YouCine, os eventos brutos e episódios identificados
-                aparecerão aqui.
+                Quando o app na Smart TV detectar um episódio no Crunchyroll, os
+                eventos e minutos assistidos aparecerão aqui.
               </p>
             </div>
           ) : (

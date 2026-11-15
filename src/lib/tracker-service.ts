@@ -1,7 +1,9 @@
 import {
   enrichTMDBResult,
   fetchCatalogEpisodes,
+  fetchMediaCatalogAndAiring,
   findBestMetadataMatch,
+  RawCatalogEpisode,
 } from "./metadata";
 import { normalizeTitle, parseScrobbleInput } from "./parser";
 import { getSupabaseAdmin } from "./supabase";
@@ -32,6 +34,106 @@ function computeNextStatus(
     return "watching";
   }
   return currentStatus;
+}
+
+function isAirDateUpcoming(airDate?: string | null): boolean {
+  if (!airDate) return false;
+  const d = new Date(airDate);
+  return !Number.isNaN(d.getTime()) && d.getTime() > Date.now();
+}
+
+function mergeCatalogWithWatched(
+  rawCatalog: Array<RawCatalogEpisode | CatalogEpisode> | null | undefined,
+  watchedRows: WatchedEpisode[]
+): CatalogEpisode[] {
+  const watchedMap = new Map<string, WatchedEpisode>();
+  for (const w of watchedRows) {
+    watchedMap.set(`${w.season}:${w.episode}`, w);
+  }
+
+  const merged: CatalogEpisode[] = (rawCatalog || []).map((ep) => {
+    const w = watchedMap.get(`${ep.season}:${ep.episode}`);
+    if (w) watchedMap.delete(`${ep.season}:${ep.episode}`);
+    const airDate = ep.air_date ?? ep.aired_at ?? null;
+    return {
+      season: ep.season,
+      episode: ep.episode,
+      title: ep.title || w?.episode_title || `Episódio ${ep.episode}`,
+      aired_at: ep.aired_at ?? (airDate ? airDate.slice(0, 10) : null),
+      air_date: airDate,
+      is_upcoming: isAirDateUpcoming(airDate),
+      duration_min: ep.duration_min ?? null,
+      thumbnail: ep.thumbnail ?? null,
+      overview: ep.overview ?? null,
+      watched: w ? w.watched : false,
+      watched_at: w?.watched ? w.watched_at : null,
+      source_app: w?.source_app ?? null,
+      position_sec: w?.position_sec ?? null,
+      duration_sec: w?.duration_sec ?? null,
+    };
+  });
+
+  for (const w of watchedMap.values()) {
+    merged.push({
+      season: w.season,
+      episode: w.episode,
+      title: w.episode_title || `Episódio ${w.episode}`,
+      aired_at: null,
+      air_date: null,
+      is_upcoming: false,
+      duration_min: null,
+      thumbnail: null,
+      overview: null,
+      watched: w.watched,
+      watched_at: w?.watched ? w.watched_at : null,
+      source_app: w.source_app,
+      position_sec: w.position_sec,
+      duration_sec: w.duration_sec,
+    });
+  }
+
+  merged.sort((a, b) =>
+    a.season !== b.season ? a.season - b.season : a.episode - b.episode
+  );
+
+  return merged;
+}
+
+export async function syncMediaCatalogCache(
+  media: MediaItem
+): Promise<MediaItem> {
+  const supabase = getSupabaseAdmin();
+  const { episodes, next_airing, airing_status, total_episodes } =
+    await fetchMediaCatalogAndAiring(media);
+  const nowIso = new Date().toISOString();
+  const nextTotal = total_episodes ?? media.total_episodes;
+
+  const { data: updated, error } = await supabase
+    .from("tv_watch_media")
+    .update({
+      catalog_episodes: episodes,
+      catalog_updated_at: nowIso,
+      next_airing,
+      airing_status,
+      total_episodes: nextTotal,
+      status: computeNextStatus(media.status, media.current_episode, nextTotal),
+    })
+    .eq("id", media.id)
+    .select("*")
+    .single();
+
+  if (error || !updated) {
+    return {
+      ...media,
+      catalog_episodes: episodes as CatalogEpisode[],
+      catalog_updated_at: nowIso,
+      next_airing,
+      airing_status,
+      total_episodes: nextTotal,
+    };
+  }
+
+  return updated as MediaItem;
 }
 
 async function findMatchingMedia(
@@ -150,7 +252,7 @@ export async function processScrobble(payload: ScrobblePayload): Promise<{
       .single();
 
     if (createErr) throw createErr;
-    media = created as MediaItem;
+    media = await syncMediaCatalogCache(created as MediaItem);
   } else if (media) {
     const seasonAdvanced = parsed.season > media.current_season;
     const nextSeason = Math.max(media.current_season, parsed.season);
@@ -187,6 +289,16 @@ export async function processScrobble(payload: ScrobblePayload): Promise<{
 
     if (updateErr) throw updateErr;
     media = updated as MediaItem;
+
+    const cacheEmpty =
+      !media.catalog_episodes || media.catalog_episodes.length === 0;
+    const cacheStale =
+      !media.catalog_updated_at ||
+      Date.now() - new Date(media.catalog_updated_at).getTime() >
+        6 * 60 * 60 * 1000;
+    if (cacheEmpty || cacheStale) {
+      media = await syncMediaCatalogCache(media);
+    }
   }
 
   if (media && parsed.episode !== null) {
@@ -281,10 +393,14 @@ export async function listMediaWithDetails(filters?: {
     epsByMedia.set(ep.media_id, arr);
   }
 
-  const enrichedAll = allMedia.map((m) => ({
-    ...m,
-    watched_episodes: epsByMedia.get(m.id) || [],
-  }));
+  const enrichedAll = allMedia.map((m) => {
+    const watchedEps = epsByMedia.get(m.id) || [];
+    return {
+      ...m,
+      watched_episodes: watchedEps,
+      catalog_episodes: mergeCatalogWithWatched(m.catalog_episodes, watchedEps),
+    };
+  });
 
   const stats = {
     total: enrichedAll.length,
@@ -398,7 +514,7 @@ export async function createManualMedia(input: {
     .single();
 
   if (error) throw error;
-  const media = data as MediaItem;
+  const media = await syncMediaCatalogCache(data as MediaItem);
 
   if (episode > 0) {
     const rows = Array.from({ length: Math.min(episode, 500) }, (_, idx) => ({
@@ -626,7 +742,7 @@ export async function patchMedia(
       .single();
 
     if (error) throw error;
-    return updated as MediaItem;
+    return syncMediaCatalogCache(updated as MediaItem);
   }
 
   throw new Error("Ação inválida");
@@ -638,25 +754,16 @@ export async function deleteMedia(id: string): Promise<void> {
   if (error) throw error;
 }
 
-export async function getMediaEpisodesWithStatus(id: string): Promise<{
+export async function getMediaEpisodesWithStatus(
+  id: string,
+  forceRefresh = false
+): Promise<{
   media: MediaItem;
   episodes: CatalogEpisode[];
 }> {
   const supabase = getSupabaseAdmin();
-  const { data: mediaRow, error: mediaErr } = await supabase
-    .from("tv_watch_media")
-    .select("*")
-    .eq("id", id)
-    .single();
-
-  if (mediaErr || !mediaRow) {
-    throw new Error("Obra não encontrada");
-  }
-
-  const media = mediaRow as MediaItem;
-
-  const [catalog, watchedRes] = await Promise.all([
-    fetchCatalogEpisodes(media),
+  const [mediaRes, watchedRes] = await Promise.all([
+    supabase.from("tv_watch_media").select("*").eq("id", id).single(),
     supabase
       .from("tv_watch_episodes")
       .select("*")
@@ -665,47 +772,26 @@ export async function getMediaEpisodesWithStatus(id: string): Promise<{
       .order("episode", { ascending: true }),
   ]);
 
+  if (mediaRes.error || !mediaRes.data) {
+    throw new Error("Obra não encontrada");
+  }
+
+  let media = mediaRes.data as MediaItem;
   const watchedRows = (watchedRes.data || []) as WatchedEpisode[];
-  const watchedMap = new Map<string, WatchedEpisode>();
-  for (const w of watchedRows) {
-    watchedMap.set(`${w.season}:${w.episode}`, w);
+
+  const cacheEmpty =
+    !media.catalog_episodes || media.catalog_episodes.length === 0;
+  if (forceRefresh || cacheEmpty) {
+    media = await syncMediaCatalogCache(media);
   }
 
-  const merged: CatalogEpisode[] = catalog.map((ep) => {
-    const w = watchedMap.get(`${ep.season}:${ep.episode}`);
-    if (w) watchedMap.delete(`${ep.season}:${ep.episode}`);
-    return {
-      ...ep,
-      title: ep.title || w?.episode_title || `Episódio ${ep.episode}`,
-      watched: w ? w.watched : false,
-      watched_at: w?.watched ? w.watched_at : null,
-      source_app: w?.source_app ?? null,
-      position_sec: w?.position_sec ?? null,
-      duration_sec: w?.duration_sec ?? null,
-    };
-  });
-
-  // Append any extra watched episodes beyond catalog length
-  for (const w of watchedMap.values()) {
-    merged.push({
-      season: w.season,
-      episode: w.episode,
-      title: w.episode_title || `Episódio ${w.episode}`,
-      aired_at: null,
-      duration_min: null,
-      thumbnail: null,
-      overview: null,
-      watched: w.watched,
-      watched_at: w.watched ? w.watched_at : null,
-      source_app: w.source_app,
-      position_sec: w.position_sec,
-      duration_sec: w.duration_sec,
-    });
-  }
-
-  merged.sort((a, b) =>
-    a.season !== b.season ? a.season - b.season : a.episode - b.episode
-  );
-
-  return { media, episodes: merged };
+  const episodes = mergeCatalogWithWatched(media.catalog_episodes, watchedRows);
+  return {
+    media: {
+      ...media,
+      watched_episodes: watchedRows,
+      catalog_episodes: episodes,
+    },
+    episodes,
+  };
 }

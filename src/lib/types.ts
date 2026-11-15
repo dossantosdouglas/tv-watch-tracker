@@ -15,6 +15,11 @@ export type MetadataProvider =
   | "tmdb"
   | "manual";
 
+export interface NextAiringInfo {
+  episode: number;
+  airing_at: string;
+}
+
 export interface WatchedEpisode {
   id: string;
   media_id: string;
@@ -26,6 +31,23 @@ export interface WatchedEpisode {
   position_sec: number | null;
   duration_sec: number | null;
   watched_at: string;
+}
+
+export interface CatalogEpisode {
+  season: number;
+  episode: number;
+  title: string | null;
+  aired_at: string | null;
+  air_date?: string | null;
+  is_upcoming?: boolean;
+  duration_min: number | null;
+  thumbnail: string | null;
+  overview: string | null;
+  watched: boolean;
+  watched_at: string | null;
+  source_app: SourceApp | null;
+  position_sec: number | null;
+  duration_sec: number | null;
 }
 
 export interface MediaItem {
@@ -54,22 +76,11 @@ export interface MediaItem {
   last_watched_at: string;
   created_at: string;
   updated_at: string;
+  catalog_episodes?: CatalogEpisode[];
+  catalog_updated_at?: string | null;
+  next_airing?: NextAiringInfo | null;
+  airing_status?: string | null;
   watched_episodes?: WatchedEpisode[];
-}
-
-export interface CatalogEpisode {
-  season: number;
-  episode: number;
-  title: string | null;
-  aired_at: string | null;
-  duration_min: number | null;
-  thumbnail: string | null;
-  overview: string | null;
-  watched: boolean;
-  watched_at: string | null;
-  source_app: SourceApp | null;
-  position_sec: number | null;
-  duration_sec: number | null;
 }
 
 export interface ScrobbleLog {
@@ -119,6 +130,7 @@ export interface SearchResult {
   release_year: number | null;
   score: number | null;
   status_airing?: string | null;
+  next_airing?: NextAiringInfo | null;
 }
 
 export type MediaPatchAction =

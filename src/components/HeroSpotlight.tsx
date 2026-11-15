@@ -1,9 +1,10 @@
 "use client";
 
-import { ListVideo, Plus, Radio, RefreshCw, Tv } from "lucide-react";
+import { Calendar, ListVideo, Plus, Radio, RefreshCw, Tv } from "lucide-react";
 import type { MediaItem } from "@/lib/types";
 import {
   formatRelativeTimePt,
+  formatReleaseDatePt,
   formatTimecode,
   getAppMeta,
   getMediaTypeLabelPt,
@@ -74,9 +75,9 @@ export function HeroSpotlight({
               Nenhuma obra registrada ainda
             </h1>
             <p className="text-sm leading-relaxed text-[#A8B0C2] sm:text-base">
-              Assim que você abrir um anime no Crunchyroll ou uma série no
-              YouCine pela Smart TV, o episódio aparece aqui automaticamente. Se
-              preferir, adicione sua primeira obra manualmente.
+              Assim que você assistir a um episódio no Crunchyroll pela Smart
+              TV, ele aparece aqui automaticamente. Se preferir, adicione seu
+              primeiro anime manualmente.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
@@ -235,6 +236,16 @@ export function HeroSpotlight({
                   `Episódio ${item.current_episode} em andamento`}
               </span>
             </div>
+
+            {item.next_airing && (
+              <div className="inline-flex flex-wrap items-center gap-2 rounded-lg border border-[#FCD34D]/35 bg-[#13151C]/90 px-3 py-1.5 text-xs font-semibold text-[#FCD34D]">
+                <Calendar className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>
+                  Próx. Ep {item.next_airing.episode}:{" "}
+                  {formatReleaseDatePt(item.next_airing.airing_at, true)}
+                </span>
+              </div>
+            )}
 
             <div className="grid gap-3 sm:grid-cols-2">
               {hasPlaybackProgress && playbackPercent !== null && (

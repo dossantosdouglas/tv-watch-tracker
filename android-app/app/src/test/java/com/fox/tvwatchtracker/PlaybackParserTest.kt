@@ -2,6 +2,7 @@ package com.fox.tvwatchtracker
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class PlaybackParserTest {
@@ -15,6 +16,13 @@ class PlaybackParserTest {
         assertEquals(1, event?.season)
         assertEquals(5, event?.episode)
         assertEquals("O Deus da Destruição e Son Goku", event?.episodeTitle)
+
+        val overgeared = "Você está assistindo Overgeared. \nTemporada 1Episódio 7. O Ferreiro"
+        val ogEvent = PlaybackParser.parseCrunchyrollContentDesc(overgeared)
+        assertNotNull(ogEvent)
+        assertEquals("Overgeared", ogEvent?.title)
+        assertEquals(1, ogEvent?.season)
+        assertEquals(7, ogEvent?.episode)
     }
 
     @Test
@@ -25,18 +33,12 @@ class PlaybackParserTest {
     }
 
     @Test
-    fun parsesYouCineFormats() {
-        val s01e05 = PlaybackParser.parseSeasonAndEpisode("S01E05")
-        assertEquals(1, s01e05.season)
-        assertEquals(5, s01e05.episode)
+    fun rejectsNonEpisodeStrings() {
+        val nonEp = PlaybackParser.parseSeasonAndEpisode("INICIO")
+        assertNull(nonEp.episode)
 
-        val ptEp = PlaybackParser.parseSeasonAndEpisode("Episódio 12 - A Batalha")
-        assertEquals(null, ptEp.season)
-        assertEquals(12, ptEp.episode)
-
-        val xFormat = PlaybackParser.parseSeasonAndEpisode("2x08")
-        assertEquals(2, xFormat.season)
-        assertEquals(8, xFormat.episode)
+        val rating = PlaybackParser.parseSeasonAndEpisode("8.4")
+        assertNull(rating.episode)
     }
 
     @Test

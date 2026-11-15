@@ -9,8 +9,6 @@ object ConfigStore {
     private const val PREFS_NAME = "tv_watch_tracker_prefs"
     private const val KEY_ENDPOINT_URL = "endpoint_url"
     private const val KEY_API_KEY = "api_key"
-    private const val KEY_LAST_YOUCINE_TITLE = "last_youcine_series_title"
-    private const val KEY_LAST_YOUCINE_UPDATED = "last_youcine_updated_ms"
     private const val KEY_LAST_CRUNCHYROLL_TITLE = "last_crunchyroll_series_title"
     private const val KEY_LAST_CRUNCHYROLL_EP_TITLE = "last_crunchyroll_ep_title"
     private const val KEY_LAST_CRUNCHYROLL_SEASON = "last_crunchyroll_season"
@@ -42,26 +40,6 @@ object ConfigStore {
             }
             apply()
         }
-    }
-
-    fun setLastYouCineSeriesTitle(context: Context, title: String) {
-        val clean = title.trim()
-        if (clean.isEmpty()) return
-        prefs(context).edit()
-            .putString(KEY_LAST_YOUCINE_TITLE, clean)
-            .putLong(KEY_LAST_YOUCINE_UPDATED, System.currentTimeMillis())
-            .apply()
-    }
-
-    fun getLastYouCineSeriesTitle(context: Context): String? {
-        val title = prefs(context).getString(KEY_LAST_YOUCINE_TITLE, null)?.trim()
-        if (title.isNullOrEmpty()) return null
-        val updated = prefs(context).getLong(KEY_LAST_YOUCINE_UPDATED, 0L)
-        // Expire stale cache after 12 hours
-        if (System.currentTimeMillis() - updated > 12L * 60L * 60L * 1000L) {
-            return null
-        }
-        return title
     }
 
     fun setLastCrunchyrollContext(

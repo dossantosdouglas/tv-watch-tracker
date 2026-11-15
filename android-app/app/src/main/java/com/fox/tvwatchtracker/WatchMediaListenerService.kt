@@ -13,10 +13,6 @@ class WatchMediaListenerService : NotificationListenerService() {
 
     companion object {
         private const val TAG = "WatchMediaListenerSvc"
-        private val SUPPORTED_PACKAGES = setOf(
-            WatchAccessibilityService.PKG_CRUNCHYROLL,
-            WatchAccessibilityService.PKG_YOUCINE
-        )
 
         @Volatile
         var isConnected: Boolean = false
@@ -89,7 +85,6 @@ class WatchMediaListenerService : NotificationListenerService() {
 
     private fun updateControllers(controllers: List<MediaController>) {
         synchronized(activeCallbacks) {
-            // Unregister old callbacks
             activeCallbacks.values.forEach { (controller, cb) ->
                 try {
                     controller.unregisterCallback(cb)
@@ -100,15 +95,15 @@ class WatchMediaListenerService : NotificationListenerService() {
 
             for (controller in controllers) {
                 val pkg = controller.packageName ?: continue
-                if (pkg !in SUPPORTED_PACKAGES) continue
+                if (pkg != WatchAccessibilityService.PKG_CRUNCHYROLL) continue
 
                 val callback = object : MediaController.Callback() {
                     override fun onMetadataChanged(metadata: MediaMetadata?) {
-                        processMediaState(pkg, metadata, controller.playbackState)
+                        processMediaState(metadata, controller.playbackState)
                     }
 
                     override fun onPlaybackStateChanged(state: PlaybackState?) {
-                        processMediaState(pkg, controller.metadata, state)
+                        processMediaState(controller.metadata, state)
                     }
 
                     override fun onSessionDestroyed() {
@@ -117,24 +112,17 @@ class WatchMediaListenerService : NotificationListenerService() {
                 }
                 controller.registerCallback(callback)
                 activeCallbacks[pkg] = controller to callback
-                processMediaState(pkg, controller.metadata, controller.playbackState)
+                processMediaState(controller.metadata, controller.playbackState)
             }
         }
     }
 
     private fun processMediaState(
-        pkg: String,
         metadata: MediaMetadata?,
         playbackState: PlaybackState?
     ) {
         val stateCode = playbackState?.state ?: PlaybackState.STATE_NONE
         if (stateCode != PlaybackState.STATE_PLAYING) return
-
-        val appName = when (pkg) {
-            WatchAccessibilityService.PKG_CRUNCHYROLL -> "crunchyroll"
-            WatchAccessibilityService.PKG_YOUCINE -> "youcine"
-            else -> return
-        }
 
         val metaTitle = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)?.trim()
         val displayTitle = metadata?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)?.trim()
@@ -148,13 +136,8 @@ class WatchMediaListenerService : NotificationListenerService() {
         val durationSec = if (durationMs > 0) (durationMs / 1000L).toInt() else null
         val positionSec = if (positionMs >= 0) (positionMs / 1000L).toInt() else null
 
-        val cachedSeries = if (appName == "crunchyroll") {
-            ConfigStore.getLastCrunchyrollSeriesTitle(this)
-        } else {
-            ConfigStore.getLastYouCineSeriesTitle(this)
-        }
+        val cachedSeries = ConfigStore.getLastCrunchyrollSeriesTitle(this)
 
-        // Crunchyroll MediaSession often puts only the episode title in description/title
         val candidateSeries = listOfNotNull(
             cachedSeries,
             albumOrArtist,
@@ -170,8 +153,11 @@ class WatchMediaListenerService : NotificationListenerService() {
         ).firstOrNull { it.isNotBlank() }
 
         val parsed = PlaybackParser.parseSeasonAndEpisode(candidateEpisode ?: candidateSeries)
-        val season = parsed.season ?: if (appName == "crunchyroll") ConfigStore.getLastCrunchyrollSeason(this) else null
-        val episode = parsed.episode ?: if (appName == "crunchyroll") ConfigStore.getLastCrunchyrollEpisode(this) else null
+        val season = parsed.season ?: ConfigStore.getLastCrunchyrollSeason(this)
+        val episode = parsed.episode ?: ConfigStore.getLastCrunchyrollEpisode(this)
+
+        // Never scrobble unless a valid episode number is positively identified
+        if (episode == null || episode <= 0) return
 
         val rawText = listOfNotNull(candidateSeries, candidateEpisode)
             .distinct()
@@ -180,7 +166,7 @@ class WatchMediaListenerService : NotificationListenerService() {
         ScrobbleReporter.report(
             this,
             WatchEvent(
-                app = appName,
+                app = "crunchyroll",
                 title = candidateSeries,
                 episodeTitle = candidateEpisode,
                 rawText = rawText,

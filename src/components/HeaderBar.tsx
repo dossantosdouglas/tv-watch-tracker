@@ -1,13 +1,15 @@
 "use client";
 
-import { Lock, Plus, Radio, Tv, Unlock } from "lucide-react";
+import { Bell, Lock, Plus, Radio, Tv, Unlock } from "lucide-react";
 
 interface HeaderBarProps {
   hasPin: boolean;
   pinRequired: boolean;
   hasLiveSignal: boolean;
+  pushSubscribed: boolean;
   logsCount: number;
   onOpenSignalDrawer: () => void;
+  onOpenNotificationsModal: () => void;
   onOpenPinModal: () => void;
   onOpenAddModal: () => void;
 }
@@ -16,8 +18,10 @@ export function HeaderBar({
   hasPin,
   pinRequired,
   hasLiveSignal,
+  pushSubscribed,
   logsCount,
   onOpenSignalDrawer,
+  onOpenNotificationsModal,
   onOpenPinModal,
   onOpenAddModal,
 }: HeaderBarProps) {
@@ -64,6 +68,25 @@ export function HeaderBar({
                 {logsCount}
               </span>
             )}
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenNotificationsModal}
+            className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-[#262A38] bg-[#13151C] px-3 py-2 text-sm font-medium text-[#F4F5F7] transition-colors hover:border-[#373D52] hover:bg-[#1B1E28] active:bg-[#262A38]"
+            aria-label={
+              pushSubscribed
+                ? "Notificações de lançamento ativas"
+                : "Configurar notificações de lançamento"
+            }
+          >
+            <Bell
+              className={`h-4 w-4 shrink-0 ${
+                pushSubscribed ? "text-[#FF9248]" : "text-[#A8B0C2]"
+              }`}
+              aria-hidden="true"
+            />
+            <span className="hidden lg:inline">Notificações</span>
           </button>
 
           <button

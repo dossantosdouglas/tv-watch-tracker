@@ -12,7 +12,6 @@ class WatchAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "WatchAccessibilitySvc"
         const val PKG_CRUNCHYROLL = "com.crunchyroll.crunchyroid"
-        const val PKG_YOUCINE = "com.world.youcinetv"
 
         @Volatile
         var isConnected: Boolean = false
@@ -20,17 +19,14 @@ class WatchAccessibilityService : AccessibilityService() {
     }
 
     private var lastScanTimeMs: Long = 0L
-    @Volatile
-    private var lastYouCineTitleMem: String? = null
     private var dynamicConfigReceiver: ConfigReceiver? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         isConnected = true
-        lastYouCineTitleMem = ConfigStore.getLastYouCineSeriesTitle(this)
         registerDynamicConfigReceiver()
-        Log.i(TAG, "WatchAccessibilityService connected")
-        scanRoots(collectTargetRoots(null))
+        Log.i(TAG, "WatchAccessibilityService connected (Crunchyroll-only mode)")
+        scanCrunchyrollRoots(collectCrunchyrollRoots(null))
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -82,46 +78,41 @@ class WatchAccessibilityService : AccessibilityService() {
             return
         }
 
-        val targetRoots = collectTargetRoots(event)
+        val targetRoots = collectCrunchyrollRoots(event)
         if (targetRoots.isEmpty()) return
 
         lastScanTimeMs = now
-        scanRoots(targetRoots)
+        scanCrunchyrollRoots(targetRoots)
     }
 
-    private fun scanRoots(targetRoots: List<Pair<String, AccessibilityNodeInfo>>) {
-        for ((pkg, root) in targetRoots) {
+    private fun scanCrunchyrollRoots(roots: List<AccessibilityNodeInfo>) {
+        for (root in roots) {
             try {
-                when (pkg) {
-                    PKG_CRUNCHYROLL -> handleCrunchyroll(root)
-                    PKG_YOUCINE -> handleYouCine(root)
-                }
+                handleCrunchyroll(root)
             } catch (e: Exception) {
-                Log.e(TAG, "Error handling $pkg accessibility tree", e)
+                Log.e(TAG, "Error handling Crunchyroll accessibility tree", e)
             }
         }
     }
 
-    private fun collectTargetRoots(event: AccessibilityEvent?): List<Pair<String, AccessibilityNodeInfo>> {
-        val results = mutableListOf<Pair<String, AccessibilityNodeInfo>>()
+    private fun collectCrunchyrollRoots(event: AccessibilityEvent?): List<AccessibilityNodeInfo> {
+        val results = mutableListOf<AccessibilityNodeInfo>()
         val seenRoots = HashSet<Int>()
 
         val eventPkg = event?.packageName?.toString()
-        if (eventPkg == PKG_CRUNCHYROLL || eventPkg == PKG_YOUCINE) {
+        if (eventPkg == PKG_CRUNCHYROLL) {
             rootInActiveWindow?.let { root ->
-                if (root.packageName?.toString() == eventPkg && seenRoots.add(System.identityHashCode(root))) {
-                    results.add(eventPkg to root)
+                if (root.packageName?.toString() == PKG_CRUNCHYROLL && seenRoots.add(System.identityHashCode(root))) {
+                    results.add(root)
                 }
             }
         }
 
-        // Also inspect all interactive windows so overlay player windows are never missed
         try {
             windows?.forEach { window ->
                 val root = window.root ?: return@forEach
-                val pkg = root.packageName?.toString()
-                if ((pkg == PKG_CRUNCHYROLL || pkg == PKG_YOUCINE) && seenRoots.add(System.identityHashCode(root))) {
-                    results.add(pkg to root)
+                if (root.packageName?.toString() == PKG_CRUNCHYROLL && seenRoots.add(System.identityHashCode(root))) {
+                    results.add(root)
                 }
             }
         } catch (e: Exception) {
@@ -130,9 +121,8 @@ class WatchAccessibilityService : AccessibilityService() {
 
         if (results.isEmpty()) {
             rootInActiveWindow?.let { root ->
-                val pkg = root.packageName?.toString()
-                if (pkg == PKG_CRUNCHYROLL || pkg == PKG_YOUCINE) {
-                    results.add(pkg to root)
+                if (root.packageName?.toString() == PKG_CRUNCHYROLL) {
+                    results.add(root)
                 }
             }
         }
@@ -168,8 +158,9 @@ class WatchAccessibilityService : AccessibilityService() {
             episode = episode
         )
 
-        val hasPlaybackSignal = descParsed != null || currentTimeStr != null || detailsEpisode != null
-        if (!hasPlaybackSignal) return
+        // Never scrobble without an active playback signal AND a positively identified episode number
+        val hasPlaybackSignal = descParsed != null || currentTimeStr != null
+        if (!hasPlaybackSignal || episode == null || episode <= 0) return
 
         val rawText = buildString {
             if (!watchingDesc.isNullOrBlank()) {
@@ -189,88 +180,6 @@ class WatchAccessibilityService : AccessibilityService() {
                 rawText = rawText,
                 season = season,
                 episode = episode,
-                positionSec = posSec,
-                durationSec = durSec,
-                state = "playing"
-            )
-        )
-    }
-
-    private fun handleYouCine(root: AccessibilityNodeInfo) {
-        val mTextTitle = findTextByViewId(root, "$PKG_YOUCINE:id/mTextTitle")
-        if (!mTextTitle.isNullOrBlank()) {
-            lastYouCineTitleMem = mTextTitle
-            ConfigStore.setLastYouCineSeriesTitle(this, mTextTitle)
-        }
-
-        var mTvName = findTextByViewId(root, "$PKG_YOUCINE:id/mTvName")
-        var currentTimeStr = findTextByViewId(root, "$PKG_YOUCINE:id/mTvCurrentTime")
-        var maxTimeStr = findTextByViewId(root, "$PKG_YOUCINE:id/mTvMaxTime")
-
-        // Fallback recursive TextView scan in case IDs change or overlay hides view IDs
-        if (mTvName.isNullOrBlank() || (currentTimeStr.isNullOrBlank() && mTextTitle.isNullOrBlank())) {
-            val fallbackTexts = collectVisibleTextViews(root)
-            if (currentTimeStr.isNullOrBlank() || maxTimeStr.isNullOrBlank()) {
-                val timeCandidates = fallbackTexts.filter { isTimeString(it) }
-                if (currentTimeStr.isNullOrBlank() && timeCandidates.isNotEmpty()) {
-                    currentTimeStr = timeCandidates[0]
-                }
-                if (maxTimeStr.isNullOrBlank() && timeCandidates.size >= 2) {
-                    maxTimeStr = timeCandidates[1]
-                }
-            }
-            if (mTvName.isNullOrBlank()) {
-                mTvName = fallbackTexts.firstOrNull { text ->
-                    !isTimeString(text) &&
-                        text.length >= 2 &&
-                        !text.equals(mTextTitle, ignoreCase = true) &&
-                        !isUiNoiseText(text)
-                }
-            }
-        }
-
-        val cachedSeriesTitle = lastYouCineTitleMem ?: ConfigStore.getLastYouCineSeriesTitle(this)
-        val hasPlayerSignal = !mTvName.isNullOrBlank() || !currentTimeStr.isNullOrBlank() || !maxTimeStr.isNullOrBlank()
-        if (!hasPlayerSignal) return
-
-        val resolvedTitle: String
-        val resolvedEpTitle: String?
-        if (!cachedSeriesTitle.isNullOrBlank()) {
-            resolvedTitle = cachedSeriesTitle
-            resolvedEpTitle = if (!mTvName.isNullOrBlank() && !mTvName.equals(cachedSeriesTitle, ignoreCase = true)) {
-                mTvName
-            } else {
-                null
-            }
-        } else {
-            val rawName = mTvName ?: return
-            resolvedTitle = rawName
-            resolvedEpTitle = rawName
-        }
-
-        val parsedEp = PlaybackParser.parseSeasonAndEpisode(mTvName ?: resolvedEpTitle)
-        val posSec = PlaybackParser.parseTimeToSeconds(currentTimeStr)
-        val durSec = PlaybackParser.parseTimeToSeconds(maxTimeStr)
-
-        val rawText = buildString {
-            append(resolvedTitle)
-            if (!mTvName.isNullOrBlank() && !mTvName.equals(resolvedTitle, ignoreCase = true)) {
-                append(" | $mTvName")
-            }
-            if (!currentTimeStr.isNullOrBlank()) {
-                append(" [$currentTimeStr/${maxTimeStr ?: "?"}]")
-            }
-        }
-
-        ScrobbleReporter.report(
-            this,
-            WatchEvent(
-                app = "youcine",
-                title = resolvedTitle,
-                episodeTitle = resolvedEpTitle,
-                rawText = rawText,
-                season = parsedEp.season,
-                episode = parsedEp.episode,
                 positionSec = posSec,
                 durationSec = durSec,
                 state = "playing"
@@ -313,36 +222,5 @@ class WatchAccessibilityService : AccessibilityService() {
             }
         }
         return null
-    }
-
-    private fun collectVisibleTextViews(root: AccessibilityNodeInfo): List<String> {
-        val results = mutableListOf<String>()
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(root)
-        var visited = 0
-        while (queue.isNotEmpty() && visited < 300) {
-            val node = queue.removeFirst()
-            visited++
-            val txt = node.text?.toString()?.trim()
-            if (!txt.isNullOrEmpty() && node.isVisibleToUser) {
-                results.add(txt)
-            }
-            for (i in 0 until node.childCount) {
-                node.getChild(i)?.let { queue.add(it) }
-            }
-        }
-        return results
-    }
-
-    private fun isTimeString(text: String): Boolean =
-        Regex("""^\d{1,2}:\d{2}(:\d{2})?$""").matches(text.trim())
-
-    private fun isUiNoiseText(text: String): Boolean {
-        val lower = text.trim().lowercase()
-        return lower in setOf(
-            "play", "pause", "pausar", "reproduzir", "assistir", "áudio", "audio",
-            "legenda", "legendas", "qualidade", "hd", "4k", "fhd", "sd", "episódios",
-            "episodios", "detalhes", "favoritos", "voltar", "próximo", "proximo"
-        )
     }
 }

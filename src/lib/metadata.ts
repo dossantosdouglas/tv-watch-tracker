@@ -2,6 +2,7 @@ import {
   CatalogEpisode,
   MediaItem,
   MediaType,
+  NextAiringInfo,
   SearchResult,
   SourceApp,
 } from "./types";
@@ -84,6 +85,16 @@ interface AniListMediaNode {
   genres: string[] | null;
   description: string | null;
   format: string | null;
+  nextAiringEpisode?: {
+    episode: number;
+    airingAt: number;
+  } | null;
+  airingSchedule?: {
+    nodes?: Array<{
+      episode: number;
+      airingAt: number;
+    }> | null;
+  } | null;
   streamingEpisodes?: Array<{
     title: string | null;
     thumbnail: string | null;
@@ -124,6 +135,14 @@ function mapAniListToSearchResult(node: AniListMediaNode): SearchResult {
         ? Math.round(node.averageScore) / 10
         : null,
     status_airing: node.status,
+    next_airing: node.nextAiringEpisode
+      ? {
+          episode: node.nextAiringEpisode.episode,
+          airing_at: new Date(
+            node.nextAiringEpisode.airingAt * 1000
+          ).toISOString(),
+        }
+      : null,
   };
 }
 
@@ -155,6 +174,10 @@ export async function searchAniList(
           averageScore
           genres
           description(asHtml: false)
+          nextAiringEpisode {
+            episode
+            airingAt
+          }
         }
       }
     }
@@ -212,6 +235,16 @@ async function fetchAniListMediaById(
         averageScore
         genres
         description(asHtml: false)
+        nextAiringEpisode {
+          episode
+          airingAt
+        }
+        airingSchedule(perPage: 50) {
+          nodes {
+            episode
+            airingAt
+          }
+        }
         streamingEpisodes {
           title
           thumbnail
@@ -336,6 +369,7 @@ async function fetchJikanEpisodes(
     episode: number;
     title: string | null;
     aired_at: string | null;
+    air_date: string | null;
   }>
 > {
   const episodes: Array<{
@@ -343,6 +377,7 @@ async function fetchJikanEpisodes(
     episode: number;
     title: string | null;
     aired_at: string | null;
+    air_date: string | null;
   }> = [];
 
   for (let page = 1; page <= maxPages; page++) {
@@ -365,6 +400,7 @@ async function fetchJikanEpisodes(
           episode: ep.mal_id,
           title: ep.title || ep.title_romanji || null,
           aired_at: ep.aired ? ep.aired.slice(0, 10) : null,
+          air_date: ep.aired || null,
         });
       }
       if (!json.pagination?.has_next_page) break;
@@ -397,6 +433,7 @@ interface TVMazeShow {
       number: number;
       name: string | null;
       airdate: string | null;
+      airstamp?: string | null;
       runtime: number | null;
       image: { medium?: string; original?: string } | null;
       summary: string | null;
@@ -809,7 +846,25 @@ function parseStreamingEpNumber(title: string | null): {
   return { episode: null, cleanTitle: title };
 }
 
-export async function fetchCatalogEpisodes(
+export type RawCatalogEpisode = Omit<
+  CatalogEpisode,
+  "watched" | "watched_at" | "source_app" | "position_sec" | "duration_sec"
+>;
+
+export interface MediaCatalogAndAiring {
+  episodes: RawCatalogEpisode[];
+  next_airing: NextAiringInfo | null;
+  airing_status: string | null;
+  total_episodes: number | null;
+}
+
+function computeIsUpcoming(airDate?: string | null): boolean {
+  if (!airDate) return false;
+  const parsed = new Date(airDate);
+  return !Number.isNaN(parsed.getTime()) && parsed.getTime() > Date.now();
+}
+
+export async function fetchMediaCatalogAndAiring(
   media: Pick<
     MediaItem,
     | "provider"
@@ -819,39 +874,34 @@ export async function fetchCatalogEpisodes(
     | "current_season"
     | "current_episode"
   >
-): Promise<
-  Array<
-    Omit<
-      CatalogEpisode,
-      "watched" | "watched_at" | "source_app" | "position_sec" | "duration_sec"
-    >
-  >
-> {
-  const map = new Map<
-    string,
-    Omit<
-      CatalogEpisode,
-      "watched" | "watched_at" | "source_app" | "position_sec" | "duration_sec"
-    >
-  >();
+): Promise<MediaCatalogAndAiring> {
+  const map = new Map<string, RawCatalogEpisode>();
+  let nextAiring: NextAiringInfo | null = null;
+  let airingStatus: string | null = null;
+  let totalEpisodes: number | null = media.total_episodes ?? null;
 
   const putEp = (
     season: number,
     episode: number,
-    patch: Partial<
-      Omit<
-        CatalogEpisode,
-        "watched" | "watched_at" | "source_app" | "position_sec" | "duration_sec"
-      >
-    >
+    patch: Partial<RawCatalogEpisode>
   ) => {
     const key = `${season}:${episode}`;
     const prev = map.get(key);
+    const airDate = patch.air_date ?? prev?.air_date ?? null;
+    const airedAt =
+      patch.aired_at ??
+      prev?.aired_at ??
+      (airDate ? airDate.slice(0, 10) : null);
     map.set(key, {
       season,
       episode,
       title: patch.title ?? prev?.title ?? null,
-      aired_at: patch.aired_at ?? prev?.aired_at ?? null,
+      aired_at: airedAt,
+      air_date: airDate,
+      is_upcoming:
+        patch.is_upcoming !== undefined
+          ? patch.is_upcoming
+          : computeIsUpcoming(airDate),
       duration_min: patch.duration_min ?? prev?.duration_min ?? null,
       thumbnail: patch.thumbnail ?? prev?.thumbnail ?? null,
       overview: patch.overview ?? prev?.overview ?? null,
@@ -862,15 +912,43 @@ export async function fetchCatalogEpisodes(
     const aniId = parseInt(media.external_id, 10);
     if (!Number.isNaN(aniId)) {
       const ani = await fetchAniListMediaById(aniId);
-      if (ani?.streamingEpisodes) {
-        ani.streamingEpisodes.forEach((se, idx) => {
-          const parsed = parseStreamingEpNumber(se.title);
-          const epNum = parsed.episode ?? idx + 1;
-          putEp(1, epNum, {
-            title: parsed.cleanTitle || se.title || null,
-            thumbnail: se.thumbnail || null,
+      if (ani) {
+        airingStatus = ani.status || null;
+        if (typeof ani.episodes === "number") {
+          totalEpisodes = ani.episodes;
+        }
+        if (ani.nextAiringEpisode) {
+          const iso = new Date(
+            ani.nextAiringEpisode.airingAt * 1000
+          ).toISOString();
+          nextAiring = {
+            episode: ani.nextAiringEpisode.episode,
+            airing_at: iso,
+          };
+          putEp(1, ani.nextAiringEpisode.episode, {
+            air_date: iso,
+            aired_at: iso.slice(0, 10),
+            is_upcoming: true,
           });
-        });
+        }
+        for (const node of ani.airingSchedule?.nodes || []) {
+          const iso = new Date(node.airingAt * 1000).toISOString();
+          putEp(1, node.episode, {
+            air_date: iso,
+            aired_at: iso.slice(0, 10),
+            is_upcoming: computeIsUpcoming(iso),
+          });
+        }
+        if (ani.streamingEpisodes) {
+          ani.streamingEpisodes.forEach((se, idx) => {
+            const parsed = parseStreamingEpNumber(se.title);
+            const epNum = parsed.episode ?? idx + 1;
+            putEp(1, epNum, {
+              title: parsed.cleanTitle || se.title || null,
+              thumbnail: se.thumbnail || null,
+            });
+          });
+        }
       }
       const malId = media.mal_id || ani?.idMal || null;
       if (malId) {
@@ -879,6 +957,7 @@ export async function fetchCatalogEpisodes(
           putEp(1, je.episode, {
             title: je.title,
             aired_at: je.aired_at,
+            air_date: je.air_date,
           });
         }
       }
@@ -891,16 +970,20 @@ export async function fetchCatalogEpisodes(
         putEp(1, je.episode, {
           title: je.title,
           aired_at: je.aired_at,
+          air_date: je.air_date,
         });
       }
     }
   } else if (media.provider === "tvmaze" && media.external_id) {
     const show = await fetchTVMazeShowWithEpisodes(media.external_id);
+    if (show) airingStatus = show.status || null;
     for (const ep of show?._embedded?.episodes || []) {
       if (typeof ep.number === "number" && ep.number > 0) {
+        const airDate = ep.airstamp || ep.airdate || null;
         putEp(ep.season || 1, ep.number, {
           title: ep.name || null,
           aired_at: ep.airdate || null,
+          air_date: airDate,
           duration_min: ep.runtime ?? null,
           thumbnail: ep.image?.medium || ep.image?.original || null,
           overview: stripHtml(ep.summary),
@@ -917,6 +1000,7 @@ export async function fetchCatalogEpisodes(
       const movie = await tmdbFetch<TMDBMovieDetails>(
         `/movie/${tmdbId}?language=pt-BR`
       );
+      airingStatus = movie?.status || null;
       putEp(1, 1, {
         title: movie?.title ? `${movie.title} (Filme Completo)` : "Filme Completo",
         thumbnail: movie?.backdrop_path
@@ -928,6 +1012,12 @@ export async function fetchCatalogEpisodes(
       const details = await tmdbFetch<TMDBTVDetails>(
         `/tv/${tmdbId}?language=pt-BR`
       );
+      if (details) {
+        airingStatus = details.status || null;
+        if (typeof details.number_of_episodes === "number") {
+          totalEpisodes = details.number_of_episodes;
+        }
+      }
       const regularSeasons = (details?.seasons || [])
         .map((s) => s.season_number)
         .filter((n) => n >= 1);
@@ -961,9 +1051,11 @@ export async function fetchCatalogEpisodes(
       seasonResponses.forEach((sJson, idx) => {
         const sNum = seasonsToFetch[idx];
         for (const ep of sJson?.episodes || []) {
+          const airDate = ep.air_date || null;
           putEp(ep.season_number || sNum, ep.episode_number, {
             title: ep.name || null,
-            aired_at: ep.air_date || null,
+            aired_at: airDate,
+            air_date: airDate,
             duration_min: ep.runtime ?? null,
             thumbnail: ep.still_path
               ? `https://image.tmdb.org/t/p/w300${ep.still_path}`
@@ -977,9 +1069,14 @@ export async function fetchCatalogEpisodes(
 
   // Fill numbered placeholders up to total_episodes (or current_episode) for season 1
   // when external catalog doesn't return all episodes (e.g. ongoing anime or manual entries).
+  const maxMappedEp = Array.from(map.values()).reduce(
+    (acc, e) => (e.season === (media.current_season || 1) ? Math.max(acc, e.episode) : acc),
+    0
+  );
   const targetCount = Math.max(
-    media.total_episodes || 0,
-    media.current_episode || 0
+    totalEpisodes || 0,
+    media.current_episode || 0,
+    maxMappedEp
   );
   const hasFullProviderCatalog =
     (media.provider === "tvmaze" || media.provider === "tmdb") && map.size > 0;
@@ -996,7 +1093,40 @@ export async function fetchCatalogEpisodes(
     }
   }
 
-  return Array.from(map.values()).sort((a, b) =>
+  const episodes = Array.from(map.values()).sort((a, b) =>
     a.season !== b.season ? a.season - b.season : a.episode - b.episode
   );
+
+  // If next_airing wasn't provided directly (e.g. TMDB/TVMaze), derive from earliest upcoming episode
+  if (!nextAiring) {
+    const nextUpcoming = episodes.find((e) => e.is_upcoming && e.air_date);
+    if (nextUpcoming && nextUpcoming.air_date) {
+      nextAiring = {
+        episode: nextUpcoming.episode,
+        airing_at: nextUpcoming.air_date,
+      };
+    }
+  }
+
+  return {
+    episodes,
+    next_airing: nextAiring,
+    airing_status: airingStatus,
+    total_episodes: totalEpisodes,
+  };
+}
+
+export async function fetchCatalogEpisodes(
+  media: Pick<
+    MediaItem,
+    | "provider"
+    | "external_id"
+    | "mal_id"
+    | "total_episodes"
+    | "current_season"
+    | "current_episode"
+  >
+): Promise<RawCatalogEpisode[]> {
+  const { episodes } = await fetchMediaCatalogAndAiring(media);
+  return episodes;
 }

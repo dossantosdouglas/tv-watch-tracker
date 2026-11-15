@@ -26,6 +26,10 @@ create table if not exists public.tv_watch_media (
   last_position_sec integer,
   last_duration_sec integer,
   last_watched_at timestamptz not null default now(),
+  catalog_episodes jsonb not null default '[]'::jsonb,
+  catalog_updated_at timestamptz,
+  next_airing jsonb,
+  airing_status text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -96,3 +100,14 @@ create trigger trg_tv_watch_media_updated_at
 alter table public.tv_watch_media enable row level security;
 alter table public.tv_watch_episodes enable row level security;
 alter table public.tv_watch_scrobble_logs enable row level security;
+
+create table if not exists public.tv_watch_push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  endpoint text not null unique,
+  p256dh text not null,
+  auth text not null,
+  user_agent text,
+  created_at timestamptz not null default now()
+);
+
+alter table public.tv_watch_push_subscriptions enable row level security;
