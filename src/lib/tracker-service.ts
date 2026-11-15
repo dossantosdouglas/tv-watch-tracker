@@ -1,4 +1,5 @@
 import {
+  enrichTMDBResult,
   fetchCatalogEpisodes,
   findBestMetadataMatch,
 } from "./metadata";
@@ -330,7 +331,10 @@ export async function createManualMedia(input: {
   status?: WatchStatus;
 }): Promise<MediaItem> {
   const supabase = getSupabaseAdmin();
-  const sr = input.searchResult;
+  const sr =
+    input.searchResult?.provider === "tmdb"
+      ? await enrichTMDBResult(input.searchResult)
+      : input.searchResult;
 
   const title = sr?.title || input.title?.trim() || "Nova Obra";
   const normalized = normalizeTitle(title);
@@ -573,7 +577,10 @@ export async function patchMedia(
   }
 
   if (payload.action === "rematch") {
-    const sr = payload.searchResult;
+    const sr =
+      payload.searchResult.provider === "tmdb"
+        ? await enrichTMDBResult(payload.searchResult)
+        : payload.searchResult;
     let totalEp = sr.total_episodes;
     if (sr.provider === "tvmaze" && totalEp === null) {
       const catalog = await fetchCatalogEpisodes({
