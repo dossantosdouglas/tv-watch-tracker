@@ -77,21 +77,24 @@ function MediaDetailModalInner({
   onEpisodesUpdated,
 }: MediaDetailModalInnerProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
-  const initialCachedEpisodes = Array.isArray(media.catalog_episodes)
-    ? media.catalog_episodes
-    : [];
 
   const [activeTab, setActiveTab] = useState<DetailModalTab>(initialTab);
-  const [episodes, setEpisodes] = useState<CatalogEpisode[]>(
-    initialCachedEpisodes
+  const [localEpisodes, setLocalEpisodes] = useState<CatalogEpisode[] | null>(
+    null
   );
-  const [epLoading, setEpLoading] = useState(
-    initialCachedEpisodes.length === 0
-  );
+  const hasCachedOnMount =
+    Array.isArray(media.catalog_episodes) && media.catalog_episodes.length > 0;
+  const [epLoading, setEpLoading] = useState(!hasCachedOnMount);
   const [epRefreshing, setEpRefreshing] = useState(false);
   const [epError, setEpError] = useState<string | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<number | "all">("all");
   const [togglingKey, setTogglingKey] = useState<string | null>(null);
+  const [markingUpToKey, setMarkingUpToKey] = useState<string | null>(null);
+
+  const episodes = useMemo(() => {
+    if (localEpisodes !== null) return localEpisodes;
+    return Array.isArray(media.catalog_episodes) ? media.catalog_episodes : [];
+  }, [localEpisodes, media.catalog_episodes]);
 
   const [draftSeason, setDraftSeason] = useState<string | null>(null);
   const [draftEpisode, setDraftEpisode] = useState<string | null>(null);
@@ -135,7 +138,7 @@ function MediaDetailModalInner({
           throw new Error(data.error || "Não foi possível carregar episódios.");
         }
         const nextList = Array.isArray(data.episodes) ? data.episodes : [];
-        setEpisodes(nextList);
+        setLocalEpisodes(nextList);
         onEpisodesUpdated?.(mediaId, nextList);
       } catch (err) {
         setEpError(
@@ -196,7 +199,7 @@ function MediaDetailModalInner({
           }
           if (active) {
             const nextList = Array.isArray(data.episodes) ? data.episodes : [];
-            setEpisodes(nextList);
+            setLocalEpisodes(nextList);
             setEpError(null);
             onEpisodesUpdated?.(media.id, nextList);
           }
@@ -259,10 +262,27 @@ function MediaDetailModalInner({
     return Array.from(set).sort((a, b) => a - b);
   }, [episodes]);
 
+  const showSeasonControls = media.media_type !== "anime" && seasons.length > 1;
+
+  const watchedCount = useMemo(
+    () => episodes.filter((ep) => ep.watched).length,
+    [episodes]
+  );
+
+  const totalCatalogCount =
+    media.total_episodes && media.total_episodes > episodes.length
+      ? media.total_episodes
+      : episodes.length;
+
+  const formatEpBadge = (season: number, episode: number) => {
+    const epPadded = String(episode).padStart(2, "0");
+    return showSeasonControls ? `T${season} · EP ${epPadded}` : `EP ${epPadded}`;
+  };
+
   const filteredEpisodes = useMemo(() => {
-    if (selectedSeason === "all") return episodes;
+    if (!showSeasonControls || selectedSeason === "all") return episodes;
     return episodes.filter((ep) => ep.season === selectedSeason);
-  }, [episodes, selectedSeason]);
+  }, [episodes, selectedSeason, showSeasonControls]);
 
   const nextEpisode = useMemo(() => {
     const releasedUnwatchedAfterCurrent = episodes.find(
@@ -282,6 +302,27 @@ function MediaDetailModalInner({
   const appMeta = getAppMeta(media.last_app);
   const cleanSynopsis = stripHtml(media.synopsis);
 
+  const applyProgressToCatalog = (
+    list: CatalogEpisode[],
+    targetSeason: number,
+    targetEpisode: number
+  ): CatalogEpisode[] => {
+    const nowIso = new Date().toISOString();
+    return list.map((item) => {
+      const isWatchedUpToHere =
+        media.media_type === "anime"
+          ? item.episode <= targetEpisode
+          : item.season < targetSeason ||
+            (item.season === targetSeason && item.episode <= targetEpisode);
+      return {
+        ...item,
+        watched: isWatchedUpToHere,
+        watched_at: isWatchedUpToHere ? item.watched_at || nowIso : null,
+        source_app: isWatchedUpToHere ? item.source_app || "manual" : null,
+      };
+    });
+  };
+
   const handleToggleEpisode = async (ep: CatalogEpisode) => {
     const key = `${ep.season}-${ep.episode}`;
     setTogglingKey(key);
@@ -294,20 +335,37 @@ function MediaDetailModalInner({
       episode_title: ep.title,
     });
     if (updated) {
-      setEpisodes((prev) =>
-        prev.map((item) =>
-          item.season === ep.season && item.episode === ep.episode
-            ? {
-                ...item,
-                watched: nextWatched,
-                watched_at: nextWatched ? new Date().toISOString() : null,
-                source_app: nextWatched ? "manual" : null,
-              }
-            : item
-        )
+      const nextList = episodes.map((item) =>
+        item.season === ep.season && item.episode === ep.episode
+          ? {
+              ...item,
+              watched: nextWatched,
+              watched_at: nextWatched ? new Date().toISOString() : null,
+              source_app: nextWatched ? ("manual" as const) : null,
+            }
+          : item
       );
+      setLocalEpisodes(nextList);
+      onEpisodesUpdated?.(media.id, nextList);
     }
     setTogglingKey(null);
+  };
+
+  const handleMarkUpToEpisode = async (ep: CatalogEpisode) => {
+    const key = `${ep.season}-${ep.episode}`;
+    setMarkingUpToKey(key);
+    const updated = await onPatchMedia(media.id, {
+      action: "set_progress",
+      season: ep.season,
+      episode: ep.episode,
+    });
+    if (updated) {
+      const nextList = applyProgressToCatalog(episodes, ep.season, ep.episode);
+      setLocalEpisodes(nextList);
+      onEpisodesUpdated?.(media.id, nextList);
+      await loadEpisodes(media.id);
+    }
+    setMarkingUpToKey(null);
   };
 
   const handleStatusChange = async (newStatus: WatchStatus) => {
@@ -321,7 +379,10 @@ function MediaDetailModalInner({
 
   const handleManualProgressSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const s = Math.max(1, Number.parseInt(manualSeason, 10) || 1);
+    const s =
+      media.media_type === "anime"
+        ? media.current_season || 1
+        : Math.max(1, Number.parseInt(manualSeason, 10) || 1);
     const ep = Math.max(0, Number.parseInt(manualEpisode, 10) || 0);
     setSavingProgress(true);
     const updated = await onPatchMedia(media.id, {
@@ -332,6 +393,9 @@ function MediaDetailModalInner({
     if (updated) {
       setDraftSeason(null);
       setDraftEpisode(null);
+      const nextList = applyProgressToCatalog(episodes, s, ep);
+      setLocalEpisodes(nextList);
+      onEpisodesUpdated?.(media.id, nextList);
       await loadEpisodes(media.id);
     }
     setSavingProgress(false);
@@ -584,18 +648,22 @@ function MediaDetailModalInner({
                     Ajustar episódio manualmente
                   </span>
                   <div className="flex items-center gap-2">
-                    <label htmlFor="manual-season-input" className="sr-only">
-                      Temporada
-                    </label>
-                    <input
-                      id="manual-season-input"
-                      type="number"
-                      min={1}
-                      value={manualSeason}
-                      onChange={(e) => setDraftSeason(e.target.value)}
-                      className="min-h-[44px] w-16 rounded-lg border border-[#373D52] bg-[#13151C] px-2.5 py-2 text-center font-mono text-sm text-[#F4F5F7]"
-                      title="Temporada"
-                    />
+                    {media.media_type !== "anime" && (
+                      <>
+                        <label htmlFor="manual-season-input" className="sr-only">
+                          Temporada
+                        </label>
+                        <input
+                          id="manual-season-input"
+                          type="number"
+                          min={1}
+                          value={manualSeason}
+                          onChange={(e) => setDraftSeason(e.target.value)}
+                          className="min-h-[44px] w-16 rounded-lg border border-[#373D52] bg-[#13151C] px-2.5 py-2 text-center font-mono text-sm text-[#F4F5F7]"
+                          title="Temporada"
+                        />
+                      </>
+                    )}
                     <span className="text-xs font-semibold text-[#A8B0C2]">
                       EP
                     </span>
@@ -626,7 +694,8 @@ function MediaDetailModalInner({
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#F47521]/45 bg-[#F47521]/10 p-3.5">
                   <div className="min-w-0 space-y-0.5">
                     <p className="font-mono text-xs font-bold text-[#FF9248]">
-                      Próximo: T{nextEpisode.season} · EP {nextEpisode.episode}
+                      Próximo:{" "}
+                      {formatEpBadge(nextEpisode.season, nextEpisode.episode)}
                     </p>
                     <p className="truncate text-sm font-semibold text-[#F4F5F7]">
                       {nextEpisode.title || `Episódio ${nextEpisode.episode}`}
@@ -648,44 +717,46 @@ function MediaDetailModalInner({
               )}
 
               <div className="flex flex-wrap items-center justify-between gap-2">
-                {seasons.length > 1 ? (
-                  <div
-                    className="flex flex-wrap gap-2"
-                    aria-label="Filtrar por temporada"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setSelectedSeason("all")}
-                      className={`min-h-[44px] rounded-lg px-3 py-1.5 text-xs font-semibold ${
-                        selectedSeason === "all"
-                          ? "bg-[#F47521] text-[#0B0C10]"
-                          : "border border-[#262A38] bg-[#1B1E28] text-[#A8B0C2] hover:text-[#F4F5F7]"
-                      }`}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-lg border border-[#262A38] bg-[#0B0C10]/80 px-2.5 py-1.5 font-mono text-xs font-semibold text-[#F4F5F7]">
+                    {totalCatalogCount > 0
+                      ? `Assistidos: ${watchedCount} / ${totalCatalogCount}`
+                      : `Assistidos: ${watchedCount}`}
+                  </span>
+
+                  {showSeasonControls && (
+                    <div
+                      className="flex flex-wrap gap-2"
+                      aria-label="Filtrar por temporada"
                     >
-                      Todas ({episodes.length})
-                    </button>
-                    {seasons.map((s) => (
                       <button
-                        key={s}
                         type="button"
-                        onClick={() => setSelectedSeason(s)}
-                        className={`min-h-[44px] rounded-lg px-3 py-1.5 font-mono text-xs font-semibold ${
-                          selectedSeason === s
+                        onClick={() => setSelectedSeason("all")}
+                        className={`min-h-[44px] rounded-lg px-3 py-1.5 text-xs font-semibold ${
+                          selectedSeason === "all"
                             ? "bg-[#F47521] text-[#0B0C10]"
                             : "border border-[#262A38] bg-[#1B1E28] text-[#A8B0C2] hover:text-[#F4F5F7]"
                         }`}
                       >
-                        Temp {s}
+                        Todas ({episodes.length})
                       </button>
-                    ))}
-                  </div>
-                ) : (
-                  <span className="text-xs font-semibold text-[#A8B0C2]">
-                    {episodes.length > 0
-                      ? `${episodes.length} episódio(s) no catálogo`
-                      : "Catálogo de episódios"}
-                  </span>
-                )}
+                      {seasons.map((s) => (
+                        <button
+                          key={s}
+                          type="button"
+                          onClick={() => setSelectedSeason(s)}
+                          className={`min-h-[44px] rounded-lg px-3 py-1.5 font-mono text-xs font-semibold ${
+                            selectedSeason === s
+                              ? "bg-[#F47521] text-[#0B0C10]"
+                              : "border border-[#262A38] bg-[#1B1E28] text-[#A8B0C2] hover:text-[#F4F5F7]"
+                          }`}
+                        >
+                          Temp {s}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
                 <button
                   type="button"
@@ -764,18 +835,19 @@ function MediaDetailModalInner({
                       nextEpisode.season === ep.season &&
                       nextEpisode.episode === ep.episode;
                     const isBusy = togglingKey === key;
+                    const isMarkingUpTo = markingUpToKey === key;
                     const epAppMeta = ep.source_app
                       ? getAppMeta(ep.source_app)
                       : null;
 
                     return (
-                      <li key={key}>
+                      <li key={key} className="flex items-stretch gap-2">
                         <button
                           type="button"
-                          disabled={isBusy}
+                          disabled={isBusy || isMarkingUpTo}
                           onClick={() => handleToggleEpisode(ep)}
                           aria-pressed={ep.watched}
-                          className={`flex min-h-[52px] w-full items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-colors ${
+                          className={`flex min-h-[52px] min-w-0 flex-1 items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-colors ${
                             ep.watched
                               ? "border-[#22C55E]/35 bg-[#22C55E]/10 hover:bg-[#22C55E]/15"
                               : isNext
@@ -802,8 +874,7 @@ function MediaDetailModalInner({
                             <div className="min-w-0">
                               <div className="flex flex-wrap items-center gap-2">
                                 <span className="font-mono text-xs font-bold text-[#F4F5F7]">
-                                  T{ep.season} · EP{" "}
-                                  {String(ep.episode).padStart(2, "0")}
+                                  {formatEpBadge(ep.season, ep.episode)}
                                 </span>
                                 {isNext && !ep.watched && (
                                   <span className="rounded bg-[#F47521] px-1.5 py-0.5 text-[10px] font-bold text-[#0B0C10]">
@@ -861,6 +932,19 @@ function MediaDetailModalInner({
                                 : "Marcar"}
                           </span>
                         </button>
+
+                        {!ep.watched && !ep.is_upcoming && (
+                          <button
+                            type="button"
+                            disabled={isBusy || isMarkingUpTo}
+                            onClick={() => handleMarkUpToEpisode(ep)}
+                            aria-label={`Marcar episódios 1 até ${ep.episode} como assistidos`}
+                            title={`Marcar até aqui (1..Ep ${ep.episode})`}
+                            className="inline-flex min-h-[52px] shrink-0 items-center justify-center rounded-xl border border-[#373D52] bg-[#13151C] px-2.5 text-xs font-semibold text-[#A8B0C2] transition-colors hover:border-[#F47521]/60 hover:bg-[#1B1E28] hover:text-[#F4F5F7] disabled:opacity-60"
+                          >
+                            {isMarkingUpTo ? "..." : "Até aqui"}
+                          </button>
+                        )}
                       </li>
                     );
                   })}

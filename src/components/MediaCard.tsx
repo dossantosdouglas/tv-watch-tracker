@@ -101,7 +101,9 @@ export function MediaCard({
           <div className="space-y-1.5">
             <div className="flex items-baseline justify-between gap-2">
               <span className="font-mono text-sm font-bold text-[#F4F5F7]">
-                T{item.current_season} · EP {item.current_episode}
+                {item.media_type === "anime" || item.current_season <= 1
+                  ? `EP ${item.current_episode}`
+                  : `T${item.current_season} · EP ${item.current_episode}`}
                 {item.total_episodes ? (
                   <span className="font-normal text-[#A8B0C2]">
                     {" "}

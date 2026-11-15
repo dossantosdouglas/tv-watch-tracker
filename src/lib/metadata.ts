@@ -362,7 +362,7 @@ interface JikanEpisode {
 
 async function fetchJikanEpisodes(
   malId: number,
-  maxPages = 2
+  maxPages = 4
 ): Promise<
   Array<{
     season: number;
@@ -870,6 +870,7 @@ export async function fetchMediaCatalogAndAiring(
     | "provider"
     | "external_id"
     | "mal_id"
+    | "media_type"
     | "total_episodes"
     | "current_season"
     | "current_episode"
@@ -879,13 +880,19 @@ export async function fetchMediaCatalogAndAiring(
   let nextAiring: NextAiringInfo | null = null;
   let airingStatus: string | null = null;
   let totalEpisodes: number | null = media.total_episodes ?? null;
+  const isAnime =
+    media.media_type === "anime" ||
+    media.provider === "anilist" ||
+    media.provider === "jikan";
 
   const putEp = (
     season: number,
     episode: number,
     patch: Partial<RawCatalogEpisode>
   ) => {
-    const key = `${season}:${episode}`;
+    if (!Number.isFinite(episode) || episode <= 0) return;
+    const normalizedSeason = isAnime ? 1 : Math.max(1, season || 1);
+    const key = `${normalizedSeason}:${episode}`;
     const prev = map.get(key);
     const airDate = patch.air_date ?? prev?.air_date ?? null;
     const airedAt =
@@ -893,7 +900,7 @@ export async function fetchMediaCatalogAndAiring(
       prev?.aired_at ??
       (airDate ? airDate.slice(0, 10) : null);
     map.set(key, {
-      season,
+      season: normalizedSeason,
       episode,
       title: patch.title ?? prev?.title ?? null,
       aired_at: airedAt,
@@ -915,7 +922,7 @@ export async function fetchMediaCatalogAndAiring(
       if (ani) {
         airingStatus = ani.status || null;
         if (typeof ani.episodes === "number") {
-          totalEpisodes = ani.episodes;
+          totalEpisodes = Math.max(totalEpisodes || 0, ani.episodes);
         }
         if (ani.nextAiringEpisode) {
           const iso = new Date(
@@ -952,7 +959,7 @@ export async function fetchMediaCatalogAndAiring(
       }
       const malId = media.mal_id || ani?.idMal || null;
       if (malId) {
-        const jikanEps = await fetchJikanEpisodes(malId, 2);
+        const jikanEps = await fetchJikanEpisodes(malId, 4);
         for (const je of jikanEps) {
           putEp(1, je.episode, {
             title: je.title,
@@ -965,7 +972,7 @@ export async function fetchMediaCatalogAndAiring(
   } else if (media.provider === "jikan" && media.external_id) {
     const malId = parseInt(media.external_id, 10);
     if (!Number.isNaN(malId)) {
-      const jikanEps = await fetchJikanEpisodes(malId, 2);
+      const jikanEps = await fetchJikanEpisodes(malId, 4);
       for (const je of jikanEps) {
         putEp(1, je.episode, {
           title: je.title,
@@ -1067,10 +1074,12 @@ export async function fetchMediaCatalogAndAiring(
     }
   }
 
-  // Fill numbered placeholders up to total_episodes (or current_episode) for season 1
-  // when external catalog doesn't return all episodes (e.g. ongoing anime or manual entries).
+  // Fill numbered placeholders up to total_episodes (or current_episode)
+  // using unified season 1 for animes so there is never a split across seasons.
+  const placeholderSeason = isAnime ? 1 : media.current_season || 1;
   const maxMappedEp = Array.from(map.values()).reduce(
-    (acc, e) => (e.season === (media.current_season || 1) ? Math.max(acc, e.episode) : acc),
+    (acc, e) =>
+      e.season === placeholderSeason ? Math.max(acc, e.episode) : acc,
     0
   );
   const targetCount = Math.max(
@@ -1078,17 +1087,19 @@ export async function fetchMediaCatalogAndAiring(
     media.current_episode || 0,
     maxMappedEp
   );
+  if (media.current_episode > (totalEpisodes || 0)) {
+    totalEpisodes = targetCount;
+  }
   const hasFullProviderCatalog =
     (media.provider === "tvmaze" || media.provider === "tmdb") && map.size > 0;
   if (
     map.size === 0 ||
-    (!hasFullProviderCatalog && targetCount > 0 && targetCount <= 200)
+    (!hasFullProviderCatalog && targetCount > 0 && targetCount <= 500)
   ) {
-    const fillCount = Math.min(Math.max(targetCount, map.size || 12), 200);
-    const s = media.current_season || 1;
+    const fillCount = Math.min(Math.max(targetCount, map.size || 12), 500);
     for (let ep = 1; ep <= fillCount; ep++) {
-      if (!map.has(`${s}:${ep}`) && !hasFullProviderCatalog) {
-        putEp(s, ep, { title: `Episódio ${ep}` });
+      if (!map.has(`${placeholderSeason}:${ep}`) && !hasFullProviderCatalog) {
+        putEp(placeholderSeason, ep, { title: `Episódio ${ep}` });
       }
     }
   }
@@ -1122,6 +1133,7 @@ export async function fetchCatalogEpisodes(
     | "provider"
     | "external_id"
     | "mal_id"
+    | "media_type"
     | "total_episodes"
     | "current_season"
     | "current_episode"

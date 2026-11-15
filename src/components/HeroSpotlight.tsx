@@ -249,7 +249,9 @@ export function HeroSpotlight({
 
             <div className="flex flex-wrap items-baseline gap-2.5 rounded-xl border border-[#262A38] bg-[#13151C]/90 px-3.5 py-2.5">
               <span className="rounded bg-[#1B1E28] px-2 py-0.5 font-mono text-sm font-bold text-[#FF9248]">
-                T{item.current_season} · EP {item.current_episode}
+                {item.media_type === "anime" || item.current_season <= 1
+                  ? `EP ${item.current_episode}`
+                  : `T${item.current_season} · EP ${item.current_episode}`}
               </span>
               <span className="text-sm font-medium text-[#F4F5F7] sm:text-base">
                 {item.last_episode_title ||

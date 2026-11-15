@@ -9,10 +9,6 @@ object ConfigStore {
     private const val PREFS_NAME = "tv_watch_tracker_prefs"
     private const val KEY_ENDPOINT_URL = "endpoint_url"
     private const val KEY_API_KEY = "api_key"
-    private const val KEY_LAST_CRUNCHYROLL_TITLE = "last_crunchyroll_series_title"
-    private const val KEY_LAST_CRUNCHYROLL_EP_TITLE = "last_crunchyroll_ep_title"
-    private const val KEY_LAST_CRUNCHYROLL_SEASON = "last_crunchyroll_season"
-    private const val KEY_LAST_CRUNCHYROLL_EPISODE = "last_crunchyroll_episode"
     private const val KEY_LAST_SCROBBLE_SUMMARY = "last_scrobble_summary"
     private const val KEY_LAST_SCROBBLE_STATUS = "last_scrobble_status"
     private const val KEY_LAST_SCROBBLE_TIME = "last_scrobble_time"
@@ -40,35 +36,6 @@ object ConfigStore {
             }
             apply()
         }
-    }
-
-    fun setLastCrunchyrollContext(
-        context: Context,
-        seriesTitle: String?,
-        episodeTitle: String?,
-        season: Int?,
-        episode: Int?
-    ) {
-        prefs(context).edit().apply {
-            if (!seriesTitle.isNullOrBlank()) putString(KEY_LAST_CRUNCHYROLL_TITLE, seriesTitle.trim())
-            if (!episodeTitle.isNullOrBlank()) putString(KEY_LAST_CRUNCHYROLL_EP_TITLE, episodeTitle.trim())
-            if (season != null) putInt(KEY_LAST_CRUNCHYROLL_SEASON, season)
-            if (episode != null) putInt(KEY_LAST_CRUNCHYROLL_EPISODE, episode)
-            apply()
-        }
-    }
-
-    fun getLastCrunchyrollSeriesTitle(context: Context): String? =
-        prefs(context).getString(KEY_LAST_CRUNCHYROLL_TITLE, null)?.trim()?.takeIf { it.isNotEmpty() }
-
-    fun getLastCrunchyrollSeason(context: Context): Int? {
-        val value = prefs(context).getInt(KEY_LAST_CRUNCHYROLL_SEASON, -1)
-        return if (value > 0) value else null
-    }
-
-    fun getLastCrunchyrollEpisode(context: Context): Int? {
-        val value = prefs(context).getInt(KEY_LAST_CRUNCHYROLL_EPISODE, -1)
-        return if (value > 0) value else null
     }
 
     fun saveLastScrobble(context: Context, summary: String, status: String, timestamp: String) {

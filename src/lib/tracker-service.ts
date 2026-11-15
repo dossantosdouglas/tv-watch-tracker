@@ -21,19 +21,109 @@ import {
 
 function computeNextStatus(
   currentStatus: WatchStatus,
-  currentEpisode: number,
-  totalEpisodes: number | null
+  currentEpisode: number
 ): WatchStatus {
-  if (totalEpisodes && totalEpisodes > 0 && currentEpisode >= totalEpisodes) {
-    return "completed";
-  }
-  if (currentStatus === "completed" && totalEpisodes && currentEpisode < totalEpisodes) {
-    return "watching";
-  }
   if (currentStatus === "plan_to_watch" && currentEpisode > 0) {
     return "watching";
   }
   return currentStatus;
+}
+
+function isAnimeMedia(media: {
+  media_type?: MediaType | null;
+  provider?: string | null;
+}): boolean {
+  return (
+    media.media_type === "anime" ||
+    media.provider === "anilist" ||
+    media.provider === "jikan"
+  );
+}
+
+async function ensureEpisodesWatchedUpTo(params: {
+  mediaId: string;
+  season: number;
+  upToEpisode: number;
+  sourceApp: "crunchyroll" | "youcine" | "manual";
+  nowIso: string;
+  latestEpisodeTitle?: string | null;
+  positionSec?: number | null;
+  durationSec?: number | null;
+}): Promise<void> {
+  const {
+    mediaId,
+    season,
+    upToEpisode,
+    sourceApp,
+    nowIso,
+    latestEpisodeTitle,
+    positionSec,
+    durationSec,
+  } = params;
+  if (!Number.isFinite(upToEpisode) || upToEpisode < 1) return;
+
+  const supabase = getSupabaseAdmin();
+  const clampedMax = Math.min(Math.floor(upToEpisode), 500);
+
+  const { data: existingRows } = await supabase
+    .from("tv_watch_episodes")
+    .select("episode, watched, episode_title")
+    .eq("media_id", mediaId)
+    .eq("season", season)
+    .lte("episode", clampedMax);
+
+  const alreadyWatched = new Map<number, { watched: boolean; episode_title: string | null }>();
+  for (const row of existingRows || []) {
+    alreadyWatched.set(row.episode, {
+      watched: Boolean(row.watched),
+      episode_title: row.episode_title ?? null,
+    });
+  }
+
+  const missingRows: Array<{
+    media_id: string;
+    season: number;
+    episode: number;
+    watched: boolean;
+    source_app: "crunchyroll" | "youcine" | "manual";
+    watched_at: string;
+  }> = [];
+
+  for (let ep = 1; ep < clampedMax; ep++) {
+    const existing = alreadyWatched.get(ep);
+    if (!existing || !existing.watched) {
+      missingRows.push({
+        media_id: mediaId,
+        season,
+        episode: ep,
+        watched: true,
+        source_app: sourceApp,
+        watched_at: nowIso,
+      });
+    }
+  }
+
+  if (missingRows.length > 0) {
+    await supabase
+      .from("tv_watch_episodes")
+      .upsert(missingRows, { onConflict: "media_id,season,episode" });
+  }
+
+  const prevLatest = alreadyWatched.get(clampedMax);
+  await supabase.from("tv_watch_episodes").upsert(
+    {
+      media_id: mediaId,
+      season,
+      episode: clampedMax,
+      episode_title: latestEpisodeTitle ?? prevLatest?.episode_title ?? null,
+      watched: true,
+      source_app: sourceApp,
+      position_sec: positionSec ?? null,
+      duration_sec: durationSec ?? null,
+      watched_at: nowIso,
+    },
+    { onConflict: "media_id,season,episode" }
+  );
 }
 
 function isAirDateUpcoming(airDate?: string | null): boolean {
@@ -51,7 +141,9 @@ function mergeCatalogWithWatched(
     watchedMap.set(`${w.season}:${w.episode}`, w);
   }
 
-  const merged: CatalogEpisode[] = (rawCatalog || []).map((ep) => {
+  const merged: CatalogEpisode[] = (rawCatalog || [])
+    .filter((ep) => ep.episode > 0)
+    .map((ep) => {
     const w = watchedMap.get(`${ep.season}:${ep.episode}`);
     if (w) watchedMap.delete(`${ep.season}:${ep.episode}`);
     const airDate = ep.air_date ?? ep.aired_at ?? null;
@@ -106,7 +198,11 @@ export async function syncMediaCatalogCache(
   const { episodes, next_airing, airing_status, total_episodes } =
     await fetchMediaCatalogAndAiring(media);
   const nowIso = new Date().toISOString();
-  const nextTotal = total_episodes ?? media.total_episodes;
+  const baseTotal = total_episodes ?? media.total_episodes;
+  const nextTotal =
+    baseTotal !== null && media.current_episode > baseTotal
+      ? Math.max(baseTotal, media.current_episode, episodes.length)
+      : baseTotal;
 
   const { data: updated, error } = await supabase
     .from("tv_watch_media")
@@ -116,7 +212,7 @@ export async function syncMediaCatalogCache(
       next_airing,
       airing_status,
       total_episodes: nextTotal,
-      status: computeNextStatus(media.status, media.current_episode, nextTotal),
+      status: computeNextStatus(media.status, media.current_episode),
     })
     .eq("id", media.id)
     .select("*")
@@ -212,10 +308,23 @@ export async function processScrobble(payload: ScrobblePayload): Promise<{
     }
   }
 
+  let effectiveSeason = parsed.season;
+
   if (!media && parsed.title !== "Título Desconhecido") {
     const initialEp =
       parsed.episode ?? (matchedMetadata?.media_type === "movie" ? 1 : 0);
-    const totalEp = matchedMetadata?.total_episodes ?? null;
+    const resolvedType = matchedMetadata?.media_type || parsed.mediaTypeHint;
+    const resolvedProvider = matchedMetadata?.provider || "manual";
+    const isAnime = isAnimeMedia({
+      media_type: resolvedType,
+      provider: resolvedProvider,
+    });
+    effectiveSeason = isAnime ? 1 : parsed.season;
+
+    let totalEp = matchedMetadata?.total_episodes ?? null;
+    if (totalEp !== null && initialEp > totalEp) {
+      totalEp = initialEp;
+    }
     const aliases = Array.from(
       new Set([parsed.title, ...(matchedMetadata?.aliases || [])].filter(Boolean))
     );
@@ -224,9 +333,9 @@ export async function processScrobble(payload: ScrobblePayload): Promise<{
       title: matchedMetadata?.title || parsed.title,
       normalized_title: normalizeTitle(matchedMetadata?.title || parsed.title),
       aliases,
-      media_type: matchedMetadata?.media_type || parsed.mediaTypeHint,
-      status: computeNextStatus("watching", initialEp, totalEp),
-      current_season: parsed.season,
+      media_type: resolvedType,
+      status: computeNextStatus("watching", initialEp),
+      current_season: effectiveSeason,
       current_episode: initialEp,
       total_episodes: totalEp,
       cover_image: matchedMetadata?.cover_image || null,
@@ -235,7 +344,7 @@ export async function processScrobble(payload: ScrobblePayload): Promise<{
       genres: matchedMetadata?.genres || [],
       release_year: matchedMetadata?.release_year || null,
       score: matchedMetadata?.score || null,
-      provider: matchedMetadata?.provider || "manual",
+      provider: resolvedProvider,
       external_id: matchedMetadata?.external_id || null,
       mal_id: matchedMetadata?.mal_id || null,
       last_app: parsed.app,
@@ -254,28 +363,32 @@ export async function processScrobble(payload: ScrobblePayload): Promise<{
     if (createErr) throw createErr;
     media = await syncMediaCatalogCache(created as MediaItem);
   } else if (media) {
-    const seasonAdvanced = parsed.season > media.current_season;
-    const nextSeason = Math.max(media.current_season, parsed.season);
+    const isAnime = isAnimeMedia(media);
+    effectiveSeason = isAnime ? 1 : Math.max(media.current_season, parsed.season);
     const nextEpisode =
-      parsed.episode !== null
-        ? seasonAdvanced
-          ? parsed.episode
-          : parsed.season === media.current_season
-            ? Math.max(media.current_episode, parsed.episode)
-            : media.current_episode
-        : media.current_episode;
+      parsed.episode !== null ? parsed.episode : media.current_episode;
+    const nextTotal =
+      media.total_episodes !== null && nextEpisode > media.total_episodes
+        ? nextEpisode
+        : media.total_episodes;
 
     const updatedAliases = Array.from(
       new Set([...(media.aliases || []), parsed.title].filter(Boolean))
     );
 
+    const nextStatus =
+      media.status === "completed" || media.status === "plan_to_watch"
+        ? "watching"
+        : computeNextStatus(media.status, nextEpisode);
+
     const { data: updated, error: updateErr } = await supabase
       .from("tv_watch_media")
       .update({
         aliases: updatedAliases,
-        current_season: nextSeason,
+        current_season: effectiveSeason,
         current_episode: nextEpisode,
-        status: computeNextStatus(media.status, nextEpisode, media.total_episodes),
+        total_episodes: nextTotal,
+        status: nextStatus,
         last_app: parsed.app,
         last_episode_title:
           parsed.episodeTitle ?? media.last_episode_title,
@@ -292,30 +405,31 @@ export async function processScrobble(payload: ScrobblePayload): Promise<{
 
     const cacheEmpty =
       !media.catalog_episodes || media.catalog_episodes.length === 0;
+    const cacheMissingCurrent =
+      nextEpisode > 0 &&
+      !(media.catalog_episodes || []).some(
+        (ep) => ep.season === effectiveSeason && ep.episode === nextEpisode
+      );
     const cacheStale =
       !media.catalog_updated_at ||
       Date.now() - new Date(media.catalog_updated_at).getTime() >
         6 * 60 * 60 * 1000;
-    if (cacheEmpty || cacheStale) {
+    if (cacheEmpty || cacheMissingCurrent || cacheStale) {
       media = await syncMediaCatalogCache(media);
     }
   }
 
-  if (media && parsed.episode !== null) {
-    await supabase.from("tv_watch_episodes").upsert(
-      {
-        media_id: media.id,
-        season: parsed.season,
-        episode: parsed.episode,
-        episode_title: parsed.episodeTitle,
-        watched: true,
-        source_app: parsed.app,
-        position_sec: parsed.positionSec,
-        duration_sec: parsed.durationSec,
-        watched_at: nowIso,
-      },
-      { onConflict: "media_id,season,episode" }
-    );
+  if (media && parsed.episode !== null && parsed.episode > 0) {
+    await ensureEpisodesWatchedUpTo({
+      mediaId: media.id,
+      season: effectiveSeason,
+      upToEpisode: parsed.episode,
+      sourceApp: parsed.app,
+      nowIso,
+      latestEpisodeTitle: parsed.episodeTitle,
+      positionSec: parsed.positionSec,
+      durationSec: parsed.durationSec,
+    });
   }
 
   const { data: logRow, error: logErr } = await supabase
@@ -472,6 +586,7 @@ export async function createManualMedia(input: {
       provider: sr.provider,
       external_id: sr.external_id,
       mal_id: sr.mal_id,
+      media_type: sr.media_type,
       total_episodes: null,
       current_season: 1,
       current_episode: 0,
@@ -479,13 +594,19 @@ export async function createManualMedia(input: {
     if (catalog.length > 0) totalEpisodes = catalog.length;
   }
 
-  const season = Math.max(1, input.current_season ?? 1);
+  const resolvedType = sr?.media_type || input.media_type || "anime";
+  const resolvedProvider = sr?.provider || "manual";
+  const season = isAnimeMedia({
+    media_type: resolvedType,
+    provider: resolvedProvider,
+  })
+    ? 1
+    : Math.max(1, input.current_season ?? 1);
   const episode = Math.max(0, input.current_episode ?? 0);
-  const status = computeNextStatus(
-    input.status || "watching",
-    episode,
-    totalEpisodes
-  );
+  if (totalEpisodes !== null && episode > totalEpisodes) {
+    totalEpisodes = episode;
+  }
+  const status = computeNextStatus(input.status || "watching", episode);
 
   const { data, error } = await supabase
     .from("tv_watch_media")
@@ -493,7 +614,7 @@ export async function createManualMedia(input: {
       title,
       normalized_title: normalized,
       aliases: Array.from(new Set([title, ...(sr?.aliases || [])])),
-      media_type: sr?.media_type || input.media_type || "anime",
+      media_type: resolvedType,
       status,
       current_season: season,
       current_episode: episode,
@@ -504,7 +625,7 @@ export async function createManualMedia(input: {
       genres: sr?.genres || [],
       release_year: sr?.release_year || null,
       score: sr?.score || null,
-      provider: sr?.provider || "manual",
+      provider: resolvedProvider,
       external_id: sr?.external_id || null,
       mal_id: sr?.mal_id || null,
       last_app: "manual",
@@ -517,17 +638,13 @@ export async function createManualMedia(input: {
   const media = await syncMediaCatalogCache(data as MediaItem);
 
   if (episode > 0) {
-    const rows = Array.from({ length: Math.min(episode, 500) }, (_, idx) => ({
-      media_id: media.id,
+    await ensureEpisodesWatchedUpTo({
+      mediaId: media.id,
       season,
-      episode: idx + 1,
-      watched: true,
-      source_app: "manual",
-      watched_at: new Date().toISOString(),
-    }));
-    await supabase
-      .from("tv_watch_episodes")
-      .upsert(rows, { onConflict: "media_id,season,episode" });
+      upToEpisode: episode,
+      sourceApp: "manual",
+      nowIso: new Date().toISOString(),
+    });
   }
 
   return media;
@@ -550,31 +667,31 @@ export async function patchMedia(
 
   const existing = existingRow as MediaItem;
   const nowIso = new Date().toISOString();
+  const isAnime = isAnimeMedia(existing);
 
   if (payload.action === "increment_episode") {
+    const season = isAnime ? 1 : existing.current_season;
     const nextEp = existing.current_episode + 1;
-    const nextStatus = computeNextStatus(
-      existing.status,
-      nextEp,
-      existing.total_episodes
-    );
+    const nextTotal =
+      existing.total_episodes !== null && nextEp > existing.total_episodes
+        ? nextEp
+        : existing.total_episodes;
+    const nextStatus = computeNextStatus(existing.status, nextEp);
 
-    await supabase.from("tv_watch_episodes").upsert(
-      {
-        media_id: id,
-        season: existing.current_season,
-        episode: nextEp,
-        watched: true,
-        source_app: "manual",
-        watched_at: nowIso,
-      },
-      { onConflict: "media_id,season,episode" }
-    );
+    await ensureEpisodesWatchedUpTo({
+      mediaId: id,
+      season,
+      upToEpisode: nextEp,
+      sourceApp: "manual",
+      nowIso,
+    });
 
     const { data: updated, error } = await supabase
       .from("tv_watch_media")
       .update({
+        current_season: season,
         current_episode: nextEp,
+        total_episodes: nextTotal,
         status: nextStatus,
         last_watched_at: nowIso,
       })
@@ -583,35 +700,38 @@ export async function patchMedia(
       .single();
 
     if (error) throw error;
-    return updated as MediaItem;
+    const updatedMedia = updated as MediaItem;
+    const hasEpInCatalog = (updatedMedia.catalog_episodes || []).some(
+      (ep) => ep.season === season && ep.episode === nextEp
+    );
+    if (!hasEpInCatalog) {
+      return syncMediaCatalogCache(updatedMedia);
+    }
+    return updatedMedia;
   }
 
   if (payload.action === "set_progress") {
-    const nextSeason = payload.season ?? existing.current_season;
+    const nextSeason = isAnime ? 1 : (payload.season ?? existing.current_season);
     const nextEpisode = payload.episode ?? existing.current_episode;
-    const nextTotal =
+    let nextTotal =
       payload.total_episodes !== undefined
         ? payload.total_episodes
         : existing.total_episodes;
+    if (nextTotal !== null && nextEpisode > nextTotal) {
+      nextTotal = nextEpisode;
+    }
     const nextStatus = payload.status
       ? payload.status
-      : computeNextStatus(existing.status, nextEpisode, nextTotal);
+      : computeNextStatus(existing.status, nextEpisode);
 
     if (payload.episode !== undefined && payload.episode > 0) {
-      const rows = Array.from(
-        { length: Math.min(payload.episode, 500) },
-        (_, idx) => ({
-          media_id: id,
-          season: nextSeason,
-          episode: idx + 1,
-          watched: true,
-          source_app: "manual",
-          watched_at: nowIso,
-        })
-      );
-      await supabase
-        .from("tv_watch_episodes")
-        .upsert(rows, { onConflict: "media_id,season,episode" });
+      await ensureEpisodesWatchedUpTo({
+        mediaId: id,
+        season: nextSeason,
+        upToEpisode: payload.episode,
+        sourceApp: "manual",
+        nowIso,
+      });
     }
 
     const { data: updated, error } = await supabase
@@ -628,11 +748,20 @@ export async function patchMedia(
       .single();
 
     if (error) throw error;
-    return updated as MediaItem;
+    const updatedMedia = updated as MediaItem;
+    if (
+      nextEpisode > 0 &&
+      !(updatedMedia.catalog_episodes || []).some(
+        (ep) => ep.season === nextSeason && ep.episode === nextEpisode
+      )
+    ) {
+      return syncMediaCatalogCache(updatedMedia);
+    }
+    return updatedMedia;
   }
 
   if (payload.action === "toggle_episode") {
-    const season = payload.season ?? existing.current_season;
+    const season = isAnime ? 1 : (payload.season ?? existing.current_season);
     const { data: existingEp } = await supabase
       .from("tv_watch_episodes")
       .select("*")
@@ -670,11 +799,7 @@ export async function patchMedia(
       .limit(1);
 
     const highestEp = watchedRows?.[0]?.episode ?? 0;
-    const nextStatus = computeNextStatus(
-      existing.status,
-      highestEp,
-      existing.total_episodes
-    );
+    const nextStatus = computeNextStatus(existing.status, highestEp);
 
     const { data: updated, error } = await supabase
       .from("tv_watch_media")
@@ -703,6 +828,7 @@ export async function patchMedia(
         provider: sr.provider,
         external_id: sr.external_id,
         mal_id: sr.mal_id,
+        media_type: sr.media_type,
         total_episodes: null,
         current_season: existing.current_season,
         current_episode: existing.current_episode,
@@ -714,6 +840,13 @@ export async function patchMedia(
       new Set([existing.title, ...(existing.aliases || []), sr.title, ...(sr.aliases || [])])
     );
 
+    const rematchedSeason = isAnimeMedia({
+      media_type: sr.media_type,
+      provider: sr.provider,
+    })
+      ? 1
+      : existing.current_season;
+
     const { data: updated, error } = await supabase
       .from("tv_watch_media")
       .update({
@@ -721,6 +854,7 @@ export async function patchMedia(
         normalized_title: normalizeTitle(sr.title),
         aliases,
         media_type: sr.media_type,
+        current_season: rematchedSeason,
         total_episodes: totalEp,
         cover_image: sr.cover_image,
         banner_image: sr.banner_image,
@@ -731,11 +865,7 @@ export async function patchMedia(
         provider: sr.provider,
         external_id: sr.external_id,
         mal_id: sr.mal_id,
-        status: computeNextStatus(
-          existing.status,
-          existing.current_episode,
-          totalEp
-        ),
+        status: computeNextStatus(existing.status, existing.current_episode),
       })
       .eq("id", id)
       .select("*")

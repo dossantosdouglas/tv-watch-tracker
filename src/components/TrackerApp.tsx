@@ -39,7 +39,8 @@ interface MediaStats {
 }
 
 const PIN_STORAGE_KEY = "tv_tracker_pin";
-const VISIBILITY_THROTTLE_MS = 30000;
+const ACTIVE_POLL_INTERVAL_MS = 8000;
+const VISIBILITY_THROTTLE_MS = 3000;
 
 const pinListeners = new Set<() => void>();
 
@@ -221,10 +222,35 @@ export function TrackerApp() {
 
     load();
 
-    const onVisibilityChange = () => {
+    let activePollTimer: number | null = null;
+
+    const stopActivePoll = () => {
+      if (activePollTimer !== null) {
+        window.clearInterval(activePollTimer);
+        activePollTimer = null;
+      }
+    };
+
+    const startActivePoll = () => {
+      stopActivePoll();
       if (document.visibilityState !== "visible") return;
-      if (Date.now() - lastFetchTsRef.current >= VISIBILITY_THROTTLE_MS) {
-        load();
+      activePollTimer = window.setInterval(() => {
+        if (active && document.visibilityState === "visible") {
+          load();
+        }
+      }, ACTIVE_POLL_INTERVAL_MS);
+    };
+
+    startActivePoll();
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        if (Date.now() - lastFetchTsRef.current >= VISIBILITY_THROTTLE_MS) {
+          load();
+        }
+        startActivePoll();
+      } else {
+        stopActivePoll();
       }
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -252,6 +278,13 @@ export function TrackerApp() {
       ReturnType<typeof createClient>["channel"]
     > | null = null;
 
+    const scheduleRealtimeReload = () => {
+      if (realtimeTimer !== null) window.clearTimeout(realtimeTimer);
+      realtimeTimer = window.setTimeout(() => {
+        if (active) load();
+      }, 600);
+    };
+
     if (supabaseUrl && supabaseAnonKey) {
       realtimeClient = createClient(supabaseUrl, supabaseAnonKey, {
         auth: { persistSession: false, autoRefreshToken: false },
@@ -261,18 +294,19 @@ export function TrackerApp() {
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "tv_watch_media" },
-          () => {
-            if (realtimeTimer !== null) window.clearTimeout(realtimeTimer);
-            realtimeTimer = window.setTimeout(() => {
-              if (active) load();
-            }, 600);
-          }
+          scheduleRealtimeReload
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "tv_watch_scrobble_logs" },
+          scheduleRealtimeReload
         )
         .subscribe();
     }
 
     return () => {
       active = false;
+      stopActivePoll();
       document.removeEventListener("visibilitychange", onVisibilityChange);
       if (realtimeTimer !== null) window.clearTimeout(realtimeTimer);
       if (realtimeClient && realtimeChannel) {
@@ -335,9 +369,11 @@ export function TrackerApp() {
         if (payload.action === "rematch") {
           showToast(`Vinculado a "${updated.title}".`);
         } else if (payload.action === "increment_episode") {
-          showToast(
-            `${updated.title}: T${updated.current_season} · EP ${updated.current_episode}`
-          );
+          const epLabel =
+            updated.media_type === "anime" || updated.current_season <= 1
+              ? `EP ${updated.current_episode}`
+              : `T${updated.current_season} · EP ${updated.current_episode}`;
+          showToast(`${updated.title}: ${epLabel}`);
         }
         return updated;
       } catch (err) {
@@ -359,10 +395,7 @@ export function TrackerApp() {
       const optimistic: MediaItem = {
         ...item,
         current_episode: nextEp,
-        status:
-          item.total_episodes && nextEp >= item.total_episodes
-            ? "completed"
-            : item.status,
+        status: item.status,
         last_watched_at: new Date().toISOString(),
       };
 
