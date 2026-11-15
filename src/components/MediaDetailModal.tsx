@@ -5,7 +5,9 @@ import {
   Calendar,
   Check,
   ChevronRight,
+  LayoutGrid,
   Link2,
+  List,
   ListVideo,
   RefreshCw,
   Search,
@@ -88,6 +90,12 @@ function MediaDetailModalInner({
   const [epRefreshing, setEpRefreshing] = useState(false);
   const [epError, setEpError] = useState<string | null>(null);
   const [selectedSeason, setSelectedSeason] = useState<number | "all">("all");
+  const [episodeViewMode, setEpisodeViewMode] = useState<"list" | "matrix">(
+    "list"
+  );
+  const [matrixClickMode, setMatrixClickMode] = useState<"up_to" | "toggle">(
+    "up_to"
+  );
   const [togglingKey, setTogglingKey] = useState<string | null>(null);
   const [markingUpToKey, setMarkingUpToKey] = useState<string | null>(null);
 
@@ -716,13 +724,46 @@ function MediaDetailModalInner({
                 </div>
               )}
 
-              <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="rounded-lg border border-[#262A38] bg-[#0B0C10]/80 px-2.5 py-1.5 font-mono text-xs font-semibold text-[#F4F5F7]">
                     {totalCatalogCount > 0
                       ? `Assistidos: ${watchedCount} / ${totalCatalogCount}`
                       : `Assistidos: ${watchedCount}`}
                   </span>
+
+                  <div
+                    role="group"
+                    aria-label="Modo de visualização dos episódios"
+                    className="inline-flex rounded-xl border border-[#262A38] bg-[#0B0C10]/80 p-1"
+                  >
+                    <button
+                      type="button"
+                      aria-pressed={episodeViewMode === "list"}
+                      onClick={() => setEpisodeViewMode("list")}
+                      className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors ${
+                        episodeViewMode === "list"
+                          ? "bg-[#F47521] text-[#0B0C10]"
+                          : "text-[#A8B0C2] hover:text-[#F4F5F7]"
+                      }`}
+                    >
+                      <List className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Lista Detalhada</span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={episodeViewMode === "matrix"}
+                      onClick={() => setEpisodeViewMode("matrix")}
+                      className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors ${
+                        episodeViewMode === "matrix"
+                          ? "bg-[#F47521] text-[#0B0C10]"
+                          : "text-[#A8B0C2] hover:text-[#F4F5F7]"
+                      }`}
+                    >
+                      <LayoutGrid className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Matriz 1..N</span>
+                    </button>
+                  </div>
 
                   {showSeasonControls && (
                     <div
@@ -826,7 +867,142 @@ function MediaDetailModalInner({
                 </div>
               )}
 
-              {!epLoading && !epError && filteredEpisodes.length > 0 && (
+              {!epLoading &&
+                !epError &&
+                filteredEpisodes.length > 0 &&
+                episodeViewMode === "matrix" && (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#262A38] bg-[#0B0C10]/70 px-3 py-2">
+                      <div className="flex flex-wrap items-center gap-3 text-[11px] font-medium text-[#A8B0C2]">
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="h-2.5 w-2.5 rounded-sm bg-[#22C55E]" />
+                          Assistido
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="h-2.5 w-2.5 rounded-sm bg-[#F47521]" />
+                          Atual / Próximo
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="h-2.5 w-2.5 rounded-full bg-[#FCD34D]" />
+                          Em breve
+                        </span>
+                      </div>
+
+                      <div
+                        role="group"
+                        aria-label="Ação ao tocar no episódio da matriz"
+                        className="flex items-center gap-1.5"
+                      >
+                        <span className="text-[11px] font-semibold text-[#A8B0C2]">
+                          Ao tocar:
+                        </span>
+                        <button
+                          type="button"
+                          aria-pressed={matrixClickMode === "up_to"}
+                          onClick={() => setMatrixClickMode("up_to")}
+                          className={`min-h-[36px] rounded-lg px-2.5 py-1 text-[11px] font-bold transition-colors ${
+                            matrixClickMode === "up_to"
+                              ? "bg-[#F47521] text-[#0B0C10]"
+                              : "border border-[#262A38] bg-[#13151C] text-[#A8B0C2] hover:text-[#F4F5F7]"
+                          }`}
+                        >
+                          Até aqui (1..X)
+                        </button>
+                        <button
+                          type="button"
+                          aria-pressed={matrixClickMode === "toggle"}
+                          onClick={() => setMatrixClickMode("toggle")}
+                          className={`min-h-[36px] rounded-lg px-2.5 py-1 text-[11px] font-bold transition-colors ${
+                            matrixClickMode === "toggle"
+                              ? "bg-[#F47521] text-[#0B0C10]"
+                              : "border border-[#262A38] bg-[#13151C] text-[#A8B0C2] hover:text-[#F4F5F7]"
+                          }`}
+                        >
+                          Individual
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-5 gap-2 sm:grid-cols-8 md:grid-cols-10">
+                      {filteredEpisodes.map((ep) => {
+                        const key = `${ep.season}-${ep.episode}`;
+                        const isBusy =
+                          togglingKey === key || markingUpToKey === key;
+                        const isCurrent =
+                          ep.episode === media.current_episode &&
+                          (media.media_type === "anime" ||
+                            ep.season === media.current_season);
+                        const isNext =
+                          nextEpisode &&
+                          nextEpisode.season === ep.season &&
+                          nextEpisode.episode === ep.episode;
+
+                        const tileTitle = `${formatEpBadge(ep.season, ep.episode)}${
+                          ep.title ? ` · ${ep.title}` : ""
+                        }${
+                          ep.is_upcoming && (ep.air_date || ep.aired_at)
+                            ? ` (Lança em ${formatReleaseDatePt(ep.air_date || ep.aired_at)})`
+                            : ""
+                        }`;
+
+                        return (
+                          <button
+                            key={key}
+                            type="button"
+                            disabled={isBusy}
+                            title={tileTitle}
+                            aria-label={tileTitle}
+                            aria-pressed={ep.watched}
+                            onClick={() => {
+                              if (matrixClickMode === "up_to") {
+                                void handleMarkUpToEpisode(ep);
+                              } else {
+                                void handleToggleEpisode(ep);
+                              }
+                            }}
+                            className={`relative flex min-h-[48px] flex-col items-center justify-center rounded-xl border font-mono text-xs font-bold transition-all active:scale-95 disabled:opacity-60 ${
+                              isCurrent
+                                ? "border-[#F47521] bg-[#F47521] text-[#0B0C10] shadow-[0_0_16px_-4px_rgba(244,117,33,0.85)]"
+                                : ep.watched
+                                  ? "border-[#22C55E]/50 bg-[#22C55E]/15 text-[#4ADE80] hover:bg-[#22C55E]/25"
+                                  : isNext
+                                    ? "border-[#F47521]/70 bg-[#1B1E28] text-[#FF9248] hover:bg-[#262A38]"
+                                    : ep.is_upcoming
+                                      ? "border-[#262A38] bg-[#0B0C10]/60 text-[#A8B0C2] hover:border-[#373D52]"
+                                      : "border-[#262A38] bg-[#13151C] text-[#F4F5F7] hover:border-[#373D52] hover:bg-[#1B1E28]"
+                            }`}
+                          >
+                            {isBusy ? (
+                              <span>...</span>
+                            ) : (
+                              <>
+                                <span>
+                                  {String(ep.episode).padStart(2, "0")}
+                                </span>
+                                {showSeasonControls && (
+                                  <span className="text-[9px] opacity-80">
+                                    T{ep.season}
+                                  </span>
+                                )}
+                              </>
+                            )}
+                            {ep.is_upcoming && (
+                              <span
+                                aria-hidden="true"
+                                className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-[#FCD34D]"
+                              />
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+              {!epLoading &&
+                !epError &&
+                filteredEpisodes.length > 0 &&
+                episodeViewMode === "list" && (
                 <ul className="space-y-2">
                   {filteredEpisodes.map((ep) => {
                     const key = `${ep.season}-${ep.episode}`;
@@ -870,6 +1046,17 @@ function MediaDetailModalInner({
                                 ep.episode
                               )}
                             </span>
+
+                            {ep.thumbnail && (
+                              <img
+                                src={ep.thumbnail}
+                                alt=""
+                                width={96}
+                                height={54}
+                                loading="lazy"
+                                className="hidden h-10 w-16 shrink-0 rounded-md border border-[#262A38] object-cover sm:block"
+                              />
+                            )}
 
                             <div className="min-w-0">
                               <div className="flex flex-wrap items-center gap-2">
