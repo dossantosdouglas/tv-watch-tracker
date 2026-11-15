@@ -1,6 +1,7 @@
 "use client";
 
-import { Calendar, ListVideo, Plus } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Calendar, ListVideo, Plus, Trash2, X } from "lucide-react";
 import type { MediaItem } from "@/lib/types";
 import {
   formatRelativeTimePt,
@@ -14,18 +15,29 @@ import {
 interface MediaCardProps {
   item: MediaItem;
   isIncrementing: boolean;
+  isDeleting: boolean;
   onIncrement: (item: MediaItem) => void;
+  onDelete: (item: MediaItem) => void;
   onOpenDetail: (item: MediaItem) => void;
 }
 
 export function MediaCard({
   item,
   isIncrementing,
+  isDeleting,
   onIncrement,
+  onDelete,
   onOpenDetail,
 }: MediaCardProps) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const appMeta = getAppMeta(item.last_app);
   const progress = getProgressPercent(item.current_episode, item.total_episodes);
+
+  useEffect(() => {
+    if (!confirmDelete) return;
+    const timer = window.setTimeout(() => setConfirmDelete(false), 4500);
+    return () => window.clearTimeout(timer);
+  }, [confirmDelete]);
 
   return (
     <article className="flex flex-col overflow-hidden rounded-xl border border-[#262A38] bg-[#13151C] transition-colors hover:border-[#373D52]">
@@ -138,26 +150,64 @@ export function MediaCard({
         </div>
       </div>
 
-      <div className="mt-auto grid grid-cols-[1fr_auto] gap-2 border-t border-[#262A38] p-2.5 sm:px-3.5 sm:py-3">
-        <button
-          type="button"
-          onClick={() => onOpenDetail(item)}
-          className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-lg border border-[#262A38] bg-[#1B1E28] px-3 py-2 text-xs font-semibold text-[#F4F5F7] transition-colors hover:border-[#373D52] hover:bg-[#262A38]"
-        >
-          <ListVideo className="h-4 w-4 text-[#A8B0C2]" aria-hidden="true" />
-          <span>Episódios</span>
-        </button>
+      <div className="mt-auto border-t border-[#262A38] p-2.5 sm:px-3.5 sm:py-3">
+        {confirmDelete ? (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={isDeleting}
+              onClick={() => {
+                setConfirmDelete(false);
+                onDelete(item);
+              }}
+              className="inline-flex min-h-[44px] flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#BE123C] px-3 py-2 text-xs font-bold text-[#FFFFFF] transition-colors hover:bg-[#E11D48] disabled:opacity-60"
+            >
+              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{isDeleting ? "Excluindo..." : "Confirmar?"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(false)}
+              aria-label={`Cancelar exclusão de ${item.title}`}
+              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg border border-[#373D52] bg-[#1B1E28] px-2.5 py-2 text-xs font-semibold text-[#F4F5F7] hover:bg-[#262A38]"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-[1fr_auto_auto] gap-2">
+            <button
+              type="button"
+              onClick={() => onOpenDetail(item)}
+              className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-lg border border-[#262A38] bg-[#1B1E28] px-3 py-2 text-xs font-semibold text-[#F4F5F7] transition-colors hover:border-[#373D52] hover:bg-[#262A38]"
+            >
+              <ListVideo className="h-4 w-4 text-[#A8B0C2]" aria-hidden="true" />
+              <span>Episódios</span>
+            </button>
 
-        <button
-          type="button"
-          disabled={isIncrementing}
-          onClick={() => onIncrement(item)}
-          aria-label={`Marcar próximo episódio de ${item.title} (+1)`}
-          className="inline-flex min-h-[44px] min-w-[60px] items-center justify-center gap-1 rounded-lg bg-[#F47521] px-3 py-2 font-mono text-xs font-bold text-[#0B0C10] transition-colors hover:bg-[#FF8B3D] active:bg-[#E06514] disabled:opacity-60"
-        >
-          <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-          <span>{isIncrementing ? "..." : "+1"}</span>
-        </button>
+            <button
+              type="button"
+              disabled={isIncrementing}
+              onClick={() => onIncrement(item)}
+              aria-label={`Marcar próximo episódio de ${item.title} (+1)`}
+              className="inline-flex min-h-[44px] min-w-[54px] items-center justify-center gap-1 rounded-lg bg-[#F47521] px-2.5 py-2 font-mono text-xs font-bold text-[#0B0C10] transition-colors hover:bg-[#FF8B3D] active:bg-[#E06514] disabled:opacity-60"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{isIncrementing ? "..." : "+1"}</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={isDeleting}
+              onClick={() => setConfirmDelete(true)}
+              aria-label={`Excluir ${item.title}`}
+              title="Excluir obra"
+              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg border border-[#262A38] bg-[#13151C] text-[#FDA4AF] transition-colors hover:border-[#BE123C] hover:bg-[#BE123C]/15 disabled:opacity-60"
+            >
+              <Trash2 className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+        )}
       </div>
     </article>
   );

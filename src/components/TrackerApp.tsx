@@ -57,14 +57,14 @@ function subscribePinStore(callback: () => void) {
 
 function getPinSnapshot(): string {
   try {
-    return window.localStorage.getItem(PIN_STORAGE_KEY) || "";
+    return window.localStorage.getItem(PIN_STORAGE_KEY) || "2026";
   } catch {
-    return "";
+    return "2026";
   }
 }
 
 function getPinServerSnapshot(): string {
-  return "";
+  return "2026";
 }
 
 function writeStoredPin(value: string) {
@@ -118,6 +118,7 @@ export function TrackerApp() {
   const [incrementingIds, setIncrementingIds] = useState<Record<string, boolean>>(
     {}
   );
+  const [deletingIds, setDeletingIds] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState<{
     message: string;
     tone: "ok" | "error";
@@ -390,6 +391,28 @@ export function TrackerApp() {
 
   const handleDeleteMedia = useCallback(
     async (mediaId: string): Promise<boolean> => {
+      if (deletingIds[mediaId]) return false;
+
+      let removedItem: MediaItem | undefined;
+      setDeletingIds((prev) => ({ ...prev, [mediaId]: true }));
+      setMedia((prev) => {
+        removedItem = prev.find((m) => m.id === mediaId);
+        return prev.filter((m) => m.id !== mediaId);
+      });
+      if (detailMediaId === mediaId) {
+        setDetailMediaId(null);
+      }
+
+      const restoreItem = () => {
+        if (!removedItem) return;
+        const itemToRestore = removedItem;
+        setMedia((prev) =>
+          prev.some((m) => m.id === itemToRestore.id)
+            ? prev
+            : [itemToRestore, ...prev]
+        );
+      };
+
       try {
         const res = await fetch(`/api/media/${mediaId}`, {
           method: "DELETE",
@@ -397,24 +420,31 @@ export function TrackerApp() {
         });
         const data = await res.json();
         if (res.status === 401) {
+          restoreItem();
           handleUnauthorized();
           return false;
         }
         if (!res.ok) {
           throw new Error(data.error || "Falha ao remover obra.");
         }
-        setMedia((prev) => prev.filter((m) => m.id !== mediaId));
         showToast("Obra removida da biblioteca.");
         return true;
       } catch (err) {
+        restoreItem();
         showToast(
           err instanceof Error ? err.message : "Erro ao remover obra.",
           "error"
         );
         return false;
+      } finally {
+        setDeletingIds((prev) => {
+          const copy = { ...prev };
+          delete copy[mediaId];
+          return copy;
+        });
       }
     },
-    [buildPinHeaders, handleUnauthorized, showToast]
+    [buildPinHeaders, deletingIds, detailMediaId, handleUnauthorized, showToast]
   );
 
   const handleAddFromSearch = useCallback(
@@ -619,7 +649,9 @@ export function TrackerApp() {
           item={heroItem}
           loading={loading}
           isIncrementing={Boolean(heroItem && incrementingIds[heroItem.id])}
+          isDeleting={Boolean(heroItem && deletingIds[heroItem.id])}
           onIncrement={handleIncrement}
+          onDelete={(item) => void handleDeleteMedia(item.id)}
           onOpenEpisodes={(item) => openDetail(item, "episodes")}
           onOpenRematch={(item) => openDetail(item, "rematch")}
           onOpenAddModal={() => setAddModalOpen(true)}
@@ -807,7 +839,9 @@ export function TrackerApp() {
                   key={item.id}
                   item={item}
                   isIncrementing={Boolean(incrementingIds[item.id])}
+                  isDeleting={Boolean(deletingIds[item.id])}
                   onIncrement={handleIncrement}
+                  onDelete={(m) => void handleDeleteMedia(m.id)}
                   onOpenDetail={(m) => openDetail(m, "episodes")}
                 />
               ))}

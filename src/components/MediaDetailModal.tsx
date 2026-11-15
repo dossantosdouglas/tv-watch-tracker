@@ -435,15 +435,53 @@ function MediaDetailModalInner({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Fechar detalhes da obra"
-            className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg text-[#A8B0C2] hover:bg-[#1B1E28] hover:text-[#F4F5F7]"
-          >
-            <X className="h-5 w-5" aria-hidden="true" />
-          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              type="button"
+              disabled={deleting}
+              onClick={() => setConfirmDelete((prev) => !prev)}
+              aria-label={`Excluir ${media.title}`}
+              title="Excluir obra"
+              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#262A38] bg-[#0B0C10] px-2.5 py-2 text-xs font-semibold text-[#FDA4AF] transition-colors hover:border-[#BE123C] hover:bg-[#BE123C]/15 disabled:opacity-60"
+            >
+              <Trash2 className="h-4 w-4" aria-hidden="true" />
+              <span className="hidden sm:inline">Excluir</span>
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Fechar detalhes da obra"
+              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg text-[#A8B0C2] hover:bg-[#1B1E28] hover:text-[#F4F5F7]"
+            >
+              <X className="h-5 w-5" aria-hidden="true" />
+            </button>
+          </div>
         </div>
+
+        {confirmDelete && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#BE123C]/60 bg-[#BE123C]/15 px-4 py-3 sm:px-5">
+            <p className="text-xs font-semibold text-[#FDA4AF]">
+              Remover &quot;{media.title}&quot; da sua lista?
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(false)}
+                className="min-h-[44px] rounded-lg border border-[#373D52] bg-[#1B1E28] px-3 py-1.5 text-xs font-semibold text-[#F4F5F7]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={handleDelete}
+                className="min-h-[44px] rounded-lg bg-[#BE123C] px-3.5 py-1.5 text-xs font-bold text-[#FFFFFF] hover:bg-[#E11D48] disabled:opacity-60"
+              >
+                {deleting ? "Excluindo..." : "Confirmar exclusão"}
+              </button>
+            </div>
+          </div>
+        )}
 
         <div
           role="tablist"

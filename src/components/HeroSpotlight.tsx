@@ -1,6 +1,15 @@
 "use client";
 
-import { Calendar, ListVideo, Plus, Radio, RefreshCw, Tv } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Calendar,
+  ListVideo,
+  Plus,
+  Radio,
+  RefreshCw,
+  Trash2,
+  Tv,
+} from "lucide-react";
 import type { MediaItem } from "@/lib/types";
 import {
   formatRelativeTimePt,
@@ -16,7 +25,9 @@ interface HeroSpotlightProps {
   item: MediaItem | null;
   loading: boolean;
   isIncrementing: boolean;
+  isDeleting: boolean;
   onIncrement: (item: MediaItem) => void;
+  onDelete: (item: MediaItem) => void;
   onOpenEpisodes: (item: MediaItem) => void;
   onOpenRematch: (item: MediaItem) => void;
   onOpenAddModal: () => void;
@@ -27,12 +38,21 @@ export function HeroSpotlight({
   item,
   loading,
   isIncrementing,
+  isDeleting,
   onIncrement,
+  onDelete,
   onOpenEpisodes,
   onOpenRematch,
   onOpenAddModal,
   onOpenSignalDrawer,
 }: HeroSpotlightProps) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  useEffect(() => {
+    if (!confirmDelete) return;
+    const timer = window.setTimeout(() => setConfirmDelete(false), 4500);
+    return () => window.clearTimeout(timer);
+  }, [confirmDelete]);
   if (loading && !item) {
     return (
       <section
@@ -327,6 +347,41 @@ export function HeroSpotlight({
               <RefreshCw className="h-4 w-4" aria-hidden="true" />
               <span>Corrigir Obra</span>
             </button>
+
+            {confirmDelete ? (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={() => {
+                    setConfirmDelete(false);
+                    onDelete(item);
+                  }}
+                  className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl bg-[#BE123C] px-3.5 py-2.5 text-sm font-bold text-[#FFFFFF] transition-colors hover:bg-[#E11D48] disabled:opacity-60"
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden="true" />
+                  <span>{isDeleting ? "Excluindo..." : "Confirmar?"}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmDelete(false)}
+                  className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-[#373D52] bg-[#1B1E28] px-3 py-2.5 text-sm font-semibold text-[#F4F5F7] hover:bg-[#262A38]"
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setConfirmDelete(true)}
+                aria-label={`Excluir ${item.title}`}
+                className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-[#262A38] bg-[#13151C] px-3.5 py-2.5 text-sm font-medium text-[#FDA4AF] transition-colors hover:border-[#BE123C] hover:bg-[#BE123C]/15 disabled:opacity-60"
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                <span>Excluir</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
