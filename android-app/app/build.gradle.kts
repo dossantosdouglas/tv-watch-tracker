@@ -17,7 +17,7 @@ android {
         buildConfigField(
             "String",
             "DEFAULT_ENDPOINT_URL",
-            "\"http://127.0.0.1:3000/api/scrobble\""
+            "\"https://tv-watch-tracker.vercel.app/api/scrobble\""
         )
         buildConfigField(
             "String",

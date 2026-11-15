@@ -1,6 +1,8 @@
 package com.fox.tvwatchtracker
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Intent
+import android.content.IntentFilter
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -20,18 +22,47 @@ class WatchAccessibilityService : AccessibilityService() {
     private var lastScanTimeMs: Long = 0L
     @Volatile
     private var lastYouCineTitleMem: String? = null
+    private var dynamicConfigReceiver: ConfigReceiver? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         isConnected = true
         lastYouCineTitleMem = ConfigStore.getLastYouCineSeriesTitle(this)
+        registerDynamicConfigReceiver()
         Log.i(TAG, "WatchAccessibilityService connected")
         scanRoots(collectTargetRoots(null))
     }
 
-    override fun onUnbind(intent: android.content.Intent?): Boolean {
+    override fun onUnbind(intent: Intent?): Boolean {
         isConnected = false
+        unregisterDynamicConfigReceiver()
         return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        unregisterDynamicConfigReceiver()
+        isConnected = false
+        super.onDestroy()
+    }
+
+    private fun registerDynamicConfigReceiver() {
+        if (dynamicConfigReceiver != null) return
+        val receiver = ConfigReceiver()
+        val filter = IntentFilter().apply {
+            addAction(ConfigReceiver.ACTION_CONFIGURE)
+            addAction(ConfigReceiver.ACTION_TEST_SCROBBLE)
+        }
+        registerReceiver(receiver, filter)
+        dynamicConfigReceiver = receiver
+    }
+
+    private fun unregisterDynamicConfigReceiver() {
+        val receiver = dynamicConfigReceiver ?: return
+        try {
+            unregisterReceiver(receiver)
+        } catch (_: Exception) {
+        }
+        dynamicConfigReceiver = null
     }
 
     override fun onInterrupt() {
