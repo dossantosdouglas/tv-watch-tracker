@@ -9,14 +9,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { createClient } from "@supabase/supabase-js";
-import {
-  Calendar,
-  LayoutGrid,
-  RefreshCw,
-  Rows3,
-  Search,
-  X,
-} from "lucide-react";
+import { LayoutGrid, RefreshCw, Rows3, Search, X } from "lucide-react";
 import type {
   CatalogEpisode,
   MediaItem,
@@ -27,7 +20,10 @@ import type {
   WatchStatus,
 } from "@/lib/types";
 import { AddMediaModal } from "./AddMediaModal";
-import { formatReleaseDatePt } from "./formatters";
+import {
+  formatSeasonEpisodeLabel,
+  resolveCurrentEpisodePosition,
+} from "./formatters";
 import { HeaderBar } from "./HeaderBar";
 import { HeroSpotlight } from "./HeroSpotlight";
 import { MediaCard, type MediaViewMode } from "./MediaCard";
@@ -104,7 +100,6 @@ export function TrackerApp() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("watching");
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
   const [viewMode, setViewMode] = useState<MediaViewMode>("grid");
-  const [selectedHeroId, setSelectedHeroId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>("");
 
   const pin = useSyncExternalStore(
@@ -379,11 +374,10 @@ export function TrackerApp() {
         if (payload.action === "rematch") {
           showToast(`Vinculado a "${updated.title}".`);
         } else if (payload.action === "increment_episode") {
-          const epLabel =
-            updated.media_type === "anime" || updated.current_season <= 1
-              ? `EP ${updated.current_episode}`
-              : `T${updated.current_season} · EP ${updated.current_episode}`;
-          showToast(`${updated.title}: ${epLabel}`);
+          const pos = resolveCurrentEpisodePosition(updated);
+          showToast(
+            `${updated.title}: ${formatSeasonEpisodeLabel(pos.season, pos.episode)}`
+          );
         }
         return updated;
       } catch (err) {
@@ -570,14 +564,7 @@ export function TrackerApp() {
     [buildPinHeaders, handleUnauthorized, showToast]
   );
 
-  const showcaseItems = useMemo(() => {
-    if (media.length === 0) return [];
-    const watching = media.filter((m) => m.status === "watching");
-    const pool = watching.length > 0 ? watching : media;
-    return pool.slice(0, 5);
-  }, [media]);
-
-  const defaultHeroItem = useMemo(() => {
+  const heroItem = useMemo(() => {
     if (media.length === 0) return null;
     const tvWatching = media.find(
       (m) =>
@@ -587,24 +574,6 @@ export function TrackerApp() {
     if (tvWatching) return tvWatching;
     const anyWatching = media.find((m) => m.status === "watching");
     return anyWatching || media[0];
-  }, [media]);
-
-  const heroItem = useMemo(() => {
-    if (selectedHeroId) {
-      const found = media.find((m) => m.id === selectedHeroId);
-      if (found) return found;
-    }
-    return defaultHeroItem;
-  }, [defaultHeroItem, media, selectedHeroId]);
-
-  const upcomingAiringItems = useMemo(() => {
-    return media
-      .filter((m) => m.next_airing != null)
-      .sort((a, b) => {
-        const ta = new Date(a.next_airing!.airing_at).getTime();
-        const tb = new Date(b.next_airing!.airing_at).getTime();
-        return ta - tb;
-      });
   }, [media]);
 
   const filteredMedia = useMemo(() => {
@@ -670,25 +639,8 @@ export function TrackerApp() {
     setDetailMediaId(item.id);
   };
 
-  const heroAuraSrc = heroItem?.banner_image || heroItem?.cover_image || null;
-
   return (
-    <div className="relative flex min-h-screen flex-col bg-[#0B0C10] text-[#F4F5F7]">
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-x-0 top-0 z-0 h-[540px] overflow-hidden"
-      >
-        {heroAuraSrc && (
-          <img
-            src={heroAuraSrc}
-            alt=""
-            className="h-full w-full scale-110 object-cover opacity-20 blur-3xl transition-opacity duration-700"
-          />
-        )}
-        <div className="cinema-grid-bg absolute inset-0" />
-        <div className="absolute inset-0 bg-gradient-to-b from-[#0B0C10]/30 via-[#0B0C10]/80 to-[#0B0C10]" />
-      </div>
-
+    <div className="flex min-h-screen flex-col bg-[#0B0C0E] text-[#F3F4F6]">
       <a href="#main-content" className="skip-link">
         Pular para o conteúdo principal
       </a>
@@ -699,8 +651,7 @@ export function TrackerApp() {
         hasLiveSignal={hasLiveSignal}
         pushSubscribed={pushSubscribed}
         logsCount={logs.length}
-        watchingCount={stats?.watching ?? 0}
-        episodesWatched={stats?.episodesWatched ?? 0}
+        totalCount={stats?.total ?? media.length}
         onOpenSignalDrawer={() => setSignalDrawerOpen(true)}
         onOpenNotificationsModal={() => setNotificationsModalOpen(true)}
         onOpenPinModal={() => {
@@ -713,7 +664,7 @@ export function TrackerApp() {
       <main
         id="main-content"
         tabIndex={-1}
-        className="relative z-10 mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-5 sm:gap-8 sm:px-6 sm:py-7"
+        className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6 sm:gap-8 sm:px-6 sm:py-8"
       >
         {error && (
           <div
@@ -724,7 +675,7 @@ export function TrackerApp() {
             <button
               type="button"
               onClick={() => void fetchTrackerData(true)}
-              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#373D52] bg-[#1B1E28] px-3.5 py-2 text-xs font-bold text-[#F4F5F7] hover:bg-[#262A38]"
+              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#22252D] bg-[#1A1D24] px-3.5 py-2 text-xs font-semibold text-[#F3F4F6]"
             >
               <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Tentar novamente</span>
@@ -734,8 +685,6 @@ export function TrackerApp() {
 
         <HeroSpotlight
           item={heroItem}
-          showcaseItems={showcaseItems}
-          onSelectHero={(id) => setSelectedHeroId(id)}
           loading={loading}
           isIncrementing={Boolean(heroItem && incrementingIds[heroItem.id])}
           isDeleting={Boolean(heroItem && deletingIds[heroItem.id])}
@@ -747,74 +696,17 @@ export function TrackerApp() {
           onOpenSignalDrawer={() => setSignalDrawerOpen(true)}
         />
 
-        {upcomingAiringItems.length > 0 && (
-          <section
-            aria-labelledby="radar-heading"
-            className="rounded-2xl border border-[#262A38] bg-[#13151C]/85 p-3.5 backdrop-blur-md sm:p-4"
-          >
-            <div className="mb-2.5 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Calendar
-                  className="h-4 w-4 text-[#FCD34D]"
-                  aria-hidden="true"
-                />
-                <h2
-                  id="radar-heading"
-                  className="font-mono text-xs font-bold uppercase tracking-wider text-[#FCD34D]"
-                >
-                  Radar de Próximos Episódios ({upcomingAiringItems.length})
-                </h2>
-              </div>
-              <span className="hidden font-mono text-[11px] text-[#A8B0C2] sm:inline">
-                Toque para abrir catálogo
-              </span>
-            </div>
-
-            <div className="flex gap-2.5 overflow-x-auto pb-1">
-              {upcomingAiringItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => openDetail(item, "episodes")}
-                  className="inline-flex min-h-[56px] max-w-[290px] shrink-0 items-center gap-3 rounded-xl border border-[#262A38] bg-[#0B0C10]/85 px-3 py-2 text-left transition-colors hover:border-[#FCD34D]/50 hover:bg-[#1B1E28]"
-                >
-                  <div className="h-11 w-8 shrink-0 overflow-hidden rounded bg-[#1B1E28]">
-                    {item.cover_image ? (
-                      <img
-                        src={item.cover_image}
-                        alt=""
-                        width={64}
-                        height={88}
-                        className="h-full w-full object-cover"
-                      />
-                    ) : null}
-                  </div>
-                  <div className="min-w-0">
-                    <p className="truncate text-xs font-bold text-[#F4F5F7]">
-                      {item.title}
-                    </p>
-                    <p className="font-mono text-[11px] font-semibold text-[#FCD34D]">
-                      Ep {item.next_airing!.episode} ·{" "}
-                      {formatReleaseDatePt(item.next_airing!.airing_at, true)}
-                    </p>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </section>
-        )}
-
         <section aria-labelledby="library-heading" className="space-y-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h2
                 id="library-heading"
-                className="text-lg font-extrabold tracking-tight text-[#F4F5F7] sm:text-xl"
+                className="text-lg font-bold tracking-tight text-[#F3F4F6] sm:text-xl"
               >
                 Sua Lista
               </h2>
               {stats && (
-                <p className="text-xs text-[#A8B0C2] sm:text-sm">
+                <p className="text-xs text-[#9CA3AF] sm:text-sm">
                   {stats.watching} assistindo · {stats.completed} completos ·{" "}
                   {stats.episodesWatched} episódios marcados
                 </p>
@@ -824,13 +716,13 @@ export function TrackerApp() {
             <div className="flex items-center gap-2">
               <label
                 htmlFor="library-search"
-                className="text-xs font-semibold text-[#A8B0C2] sm:sr-only"
+                className="text-xs font-semibold text-[#9CA3AF] sm:sr-only"
               >
                 Filtrar obras
               </label>
               <div className="relative flex-1 sm:w-72">
                 <Search
-                  className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#A8B0C2]"
+                  className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#9CA3AF]"
                   aria-hidden="true"
                 />
                 <input
@@ -839,14 +731,14 @@ export function TrackerApp() {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Filtrar por título..."
-                  className="min-h-[44px] w-full rounded-xl border border-[#262A38] bg-[#13151C] py-2 pl-9 pr-9 text-sm text-[#F4F5F7] placeholder:text-[#64748B] focus:border-[#F47521]"
+                  className="min-h-[44px] w-full rounded-lg border border-[#22252D] bg-[#131519] py-2 pl-9 pr-9 text-sm text-[#F3F4F6] placeholder:text-[#6B7280] focus:border-[#F47521]"
                 />
                 {searchQuery && (
                   <button
                     type="button"
                     onClick={() => setSearchQuery("")}
                     aria-label="Limpar busca"
-                    className="absolute right-1 top-1/2 inline-flex min-h-[36px] min-w-[36px] -translate-y-1/2 items-center justify-center rounded-lg text-[#A8B0C2] hover:text-[#F4F5F7]"
+                    className="absolute right-1 top-1/2 inline-flex min-h-[36px] min-w-[36px] -translate-y-1/2 items-center justify-center rounded-md text-[#9CA3AF] hover:text-[#F3F4F6]"
                   >
                     <X className="h-4 w-4" aria-hidden="true" />
                   </button>
@@ -857,7 +749,7 @@ export function TrackerApp() {
                 disabled={refreshing}
                 onClick={() => void fetchTrackerData(true)}
                 aria-label="Atualizar lista agora"
-                className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-xl border border-[#262A38] bg-[#13151C] text-[#A8B0C2] hover:border-[#373D52] hover:bg-[#1B1E28] hover:text-[#F4F5F7] disabled:opacity-60"
+                className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-lg border border-[#22252D] bg-[#131519] text-[#9CA3AF] hover:border-[#2E323D] hover:text-[#F3F4F6] disabled:opacity-60"
               >
                 <RefreshCw
                   className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`}
@@ -888,10 +780,10 @@ export function TrackerApp() {
                     type="button"
                     aria-pressed={active}
                     onClick={() => setStatusFilter(tab.id)}
-                    className={`min-h-[44px] rounded-xl px-3.5 py-2 text-xs font-bold transition-colors sm:text-sm ${
+                    className={`min-h-[44px] rounded-lg px-3.5 py-2 text-xs font-semibold transition-colors sm:text-sm ${
                       active
-                        ? "bg-[#F47521] text-[#0B0C10]"
-                        : "border border-[#262A38] bg-[#13151C] text-[#A8B0C2] hover:border-[#373D52] hover:text-[#F4F5F7]"
+                        ? "bg-[#F47521] text-[#0B0C0E]"
+                        : "border border-[#22252D] bg-[#131519] text-[#9CA3AF] hover:border-[#2E323D] hover:text-[#F3F4F6]"
                     }`}
                   >
                     {tab.label}
@@ -921,10 +813,10 @@ export function TrackerApp() {
                         type="button"
                         aria-pressed={active}
                         onClick={() => setTypeFilter(t.id)}
-                        className={`min-h-[44px] rounded-xl border px-3 py-2 text-xs font-semibold transition-colors ${
+                        className={`min-h-[44px] rounded-lg border px-3 py-2 text-xs font-medium transition-colors ${
                           active
-                            ? "border-[#F47521] bg-[#1B1E28] text-[#FF9248]"
-                            : "border-[#262A38] bg-[#13151C] text-[#A8B0C2] hover:border-[#373D52] hover:text-[#F4F5F7]"
+                            ? "border-[#F47521] bg-[#1A1D24] text-[#F3F4F6]"
+                            : "border-[#22252D] bg-[#131519] text-[#9CA3AF] hover:border-[#2E323D] hover:text-[#F3F4F6]"
                         }`}
                       >
                         {t.label}
@@ -937,33 +829,33 @@ export function TrackerApp() {
               <div
                 role="group"
                 aria-label="Modo de exibição da lista"
-                className="inline-flex rounded-xl border border-[#262A38] bg-[#13151C] p-1"
+                className="inline-flex rounded-lg border border-[#22252D] bg-[#131519] p-1"
               >
                 <button
                   type="button"
                   aria-pressed={viewMode === "grid"}
                   onClick={() => setViewMode("grid")}
-                  className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors ${
+                  className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                     viewMode === "grid"
-                      ? "bg-[#F47521] text-[#0B0C10]"
-                      : "text-[#A8B0C2] hover:text-[#F4F5F7]"
+                      ? "bg-[#1A1D24] text-[#F3F4F6]"
+                      : "text-[#9CA3AF] hover:text-[#F3F4F6]"
                   }`}
                 >
                   <LayoutGrid className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Grade Cinema</span>
+                  <span>Grade</span>
                 </button>
                 <button
                   type="button"
                   aria-pressed={viewMode === "compact"}
                   onClick={() => setViewMode("compact")}
-                  className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors ${
+                  className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
                     viewMode === "compact"
-                      ? "bg-[#F47521] text-[#0B0C10]"
-                      : "text-[#A8B0C2] hover:text-[#F4F5F7]"
+                      ? "bg-[#1A1D24] text-[#F3F4F6]"
+                      : "text-[#9CA3AF] hover:text-[#F3F4F6]"
                   }`}
                 >
                   <Rows3 className="h-3.5 w-3.5" aria-hidden="true" />
-                  <span>Lista Compacta</span>
+                  <span>Lista</span>
                 </button>
               </div>
             </div>
@@ -974,18 +866,18 @@ export function TrackerApp() {
               {Array.from({ length: 4 }).map((_, idx) => (
                 <div
                   key={idx}
-                  className="h-44 rounded-xl border border-[#262A38] bg-[#13151C] sm:h-80"
+                  className="h-44 rounded-xl border border-[#22252D] bg-[#131519] sm:h-80"
                 />
               ))}
             </div>
           ) : filteredMedia.length === 0 ? (
-            <div className="rounded-2xl border border-[#262A38] bg-[#13151C] p-6 text-center sm:p-8">
-              <p className="text-base font-bold text-[#F4F5F7]">
+            <div className="rounded-xl border border-[#22252D] bg-[#131519] p-6 text-center sm:p-8">
+              <p className="text-base font-bold text-[#F3F4F6]">
                 {media.length === 0
                   ? "Sua lista ainda está vazia"
                   : "Nenhuma obra encontrada com esses filtros"}
               </p>
-              <p className="mt-1 text-sm text-[#A8B0C2]">
+              <p className="mt-1 text-sm text-[#9CA3AF]">
                 {media.length === 0
                   ? "Adicione uma obra manualmente ou comece a assistir na Smart TV."
                   : "Limpe a busca ou troque o filtro de status para ver outras obras."}
@@ -999,7 +891,7 @@ export function TrackerApp() {
                       setTypeFilter("all");
                       setSearchQuery("");
                     }}
-                    className="min-h-[44px] rounded-xl border border-[#373D52] bg-[#1B1E28] px-4 py-2 text-sm font-semibold text-[#F4F5F7] hover:bg-[#262A38]"
+                    className="min-h-[44px] rounded-lg border border-[#22252D] bg-[#1A1D24] px-4 py-2 text-sm font-medium text-[#F3F4F6]"
                   >
                     Mostrar todas as obras
                   </button>
@@ -1007,7 +899,7 @@ export function TrackerApp() {
                 <button
                   type="button"
                   onClick={() => setAddModalOpen(true)}
-                  className="min-h-[44px] rounded-xl bg-[#F47521] px-4 py-2 text-sm font-bold text-[#0B0C10] hover:bg-[#FF8B3D]"
+                  className="min-h-[44px] rounded-lg bg-[#F47521] px-4 py-2 text-sm font-semibold text-[#0B0C0E] hover:bg-[#FF8533]"
                 >
                   Adicionar Obra
                 </button>
@@ -1038,30 +930,30 @@ export function TrackerApp() {
         </section>
       </main>
 
-      <footer className="relative z-10 border-t border-[#262A38] bg-[#0B0C10]/90 py-5 backdrop-blur-md">
-        <div className="mx-auto flex max-w-7xl flex-col items-start justify-between gap-2 px-4 text-xs text-[#A8B0C2] sm:flex-row sm:items-center sm:px-6">
+      <footer className="border-t border-[#22252D] bg-[#0B0C0E] py-5">
+        <div className="mx-auto flex max-w-6xl flex-col items-start justify-between gap-2 px-4 text-xs text-[#9CA3AF] sm:flex-row sm:items-center sm:px-6">
           <p>
-            Onde Parei · Sincronização em tempo real com Crunchyroll na Smart TV
+            Onde Parei · Sincronização com Crunchyroll na Smart TV
           </p>
           <div className="flex flex-wrap gap-4">
             <button
               type="button"
               onClick={() => setNotificationsModalOpen(true)}
-              className="min-h-[44px] font-medium text-[#A8B0C2] underline-offset-4 hover:text-[#F4F5F7] hover:underline"
+              className="min-h-[44px] font-medium text-[#9CA3AF] underline-offset-4 hover:text-[#F3F4F6] hover:underline"
             >
               Notificações
             </button>
             <button
               type="button"
               onClick={() => setSignalDrawerOpen(true)}
-              className="min-h-[44px] font-medium text-[#A8B0C2] underline-offset-4 hover:text-[#F4F5F7] hover:underline"
+              className="min-h-[44px] font-medium text-[#9CA3AF] underline-offset-4 hover:text-[#F3F4F6] hover:underline"
             >
               Histórico da TV
             </button>
             <button
               type="button"
               onClick={() => setAddModalOpen(true)}
-              className="min-h-[44px] font-medium text-[#A8B0C2] underline-offset-4 hover:text-[#F4F5F7] hover:underline"
+              className="min-h-[44px] font-medium text-[#9CA3AF] underline-offset-4 hover:text-[#F3F4F6] hover:underline"
             >
               Adicionar Obra
             </button>

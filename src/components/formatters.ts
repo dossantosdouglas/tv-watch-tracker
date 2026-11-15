@@ -1,4 +1,6 @@
 import type {
+  CatalogEpisode,
+  MediaItem,
   MediaType,
   MetadataProvider,
   SourceApp,
@@ -63,24 +65,24 @@ export function getAppMeta(app: SourceApp | string | null | undefined): {
   if (normalized === "crunchyroll") {
     return {
       label: "Crunchyroll",
-      badgeClass: "bg-[#F47521] text-[#0B0C10] font-bold",
+      badgeClass: "bg-[#F47521] text-[#0B0C0E] font-semibold",
       barClass: "bg-[#F47521]",
-      textClass: "text-[#FF9248]",
+      textClass: "text-[#F47521]",
     };
   }
   if (normalized === "youcine") {
     return {
       label: "YouCine",
-      badgeClass: "bg-[#BE123C] text-[#FFFFFF] font-bold",
-      barClass: "bg-[#E11D48]",
-      textClass: "text-[#FDA4AF]",
+      badgeClass: "bg-[#1A1D24] text-[#F3F4F6] border border-[#22252D] font-medium",
+      barClass: "bg-[#F47521]",
+      textClass: "text-[#9CA3AF]",
     };
   }
   return {
     label: "Manual",
-    badgeClass: "bg-[#1B1E28] text-[#38BDF8] border border-[#38BDF8]/40 font-semibold",
-    barClass: "bg-[#38BDF8]",
-    textClass: "text-[#38BDF8]",
+    badgeClass: "bg-[#1A1D24] text-[#9CA3AF] border border-[#22252D] font-medium",
+    barClass: "bg-[#F47521]",
+    textClass: "text-[#9CA3AF]",
   };
 }
 
@@ -172,6 +174,94 @@ export function formatReleaseDatePt(
     minute: "2-digit",
   });
   return `${datePart} às ${timePart}`;
+}
+
+export function formatSeasonEpisodeLabel(
+  season: number,
+  episode: number
+): string {
+  const sPad = String(Math.max(1, season)).padStart(2, "0");
+  const epPad = String(Math.max(0, episode)).padStart(2, "0");
+  return `Temporada ${sPad} · Episódio ${epPad}`;
+}
+
+export function getEpisodeAbsNumber(
+  ep: CatalogEpisode,
+  fallbackIndex = 0
+): number {
+  const candidate = (ep as CatalogEpisode & { abs_episode?: unknown })
+    .abs_episode;
+  if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
+    return candidate;
+  }
+  return fallbackIndex > 0 ? fallbackIndex : ep.episode;
+}
+
+export function resolveCurrentEpisodePosition(item: MediaItem): {
+  season: number;
+  episode: number;
+  absEpisode: number;
+  totalEpisodes: number | null;
+} {
+  const catalog = Array.isArray(item.catalog_episodes)
+    ? item.catalog_episodes
+    : [];
+  const totalFromCatalog = catalog.length > 0 ? catalog.length : null;
+  const effectiveTotal =
+    item.total_episodes && totalFromCatalog
+      ? Math.max(item.total_episodes, totalFromCatalog)
+      : item.total_episodes ?? totalFromCatalog;
+
+  if (catalog.length > 0 && item.current_episode > 0) {
+    const byExactAbsAndSeason = catalog.findIndex(
+      (ep, idx) =>
+        getEpisodeAbsNumber(ep, idx + 1) === item.current_episode &&
+        ep.season === item.current_season
+    );
+    if (byExactAbsAndSeason >= 0) {
+      const ep = catalog[byExactAbsAndSeason];
+      return {
+        season: ep.season,
+        episode: ep.episode,
+        absEpisode: getEpisodeAbsNumber(ep, byExactAbsAndSeason + 1),
+        totalEpisodes: effectiveTotal,
+      };
+    }
+
+    const byAbs = catalog.findIndex(
+      (ep, idx) => getEpisodeAbsNumber(ep, idx + 1) === item.current_episode
+    );
+    if (byAbs >= 0) {
+      const ep = catalog[byAbs];
+      return {
+        season: ep.season,
+        episode: ep.episode,
+        absEpisode: getEpisodeAbsNumber(ep, byAbs + 1),
+        totalEpisodes: effectiveTotal,
+      };
+    }
+
+    const bySeasonAndEp = catalog.findIndex(
+      (ep) =>
+        ep.season === item.current_season && ep.episode === item.current_episode
+    );
+    if (bySeasonAndEp >= 0) {
+      const ep = catalog[bySeasonAndEp];
+      return {
+        season: ep.season,
+        episode: ep.episode,
+        absEpisode: getEpisodeAbsNumber(ep, bySeasonAndEp + 1),
+        totalEpisodes: effectiveTotal,
+      };
+    }
+  }
+
+  return {
+    season: Math.max(1, item.current_season || 1),
+    episode: Math.max(0, item.current_episode || 0),
+    absEpisode: Math.max(0, item.current_episode || 0),
+    totalEpisodes: effectiveTotal,
+  };
 }
 
 export function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {

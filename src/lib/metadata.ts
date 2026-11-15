@@ -24,7 +24,7 @@ function stripHtml(html?: string | null): string | null {
     .trim();
 }
 
-function titleSimilarityScore(query: string, candidates: string[]): number {
+export function titleSimilarityScore(query: string, candidates: string[]): number {
   const nq = normalizeTitle(query);
   if (!nq) return 0;
 
@@ -64,6 +64,30 @@ function titleSimilarityScore(query: string, candidates: string[]): number {
 // 1. AniList GraphQL API
 // ============================================================================
 
+interface AniListDate {
+  year: number | null;
+  month: number | null;
+  day: number | null;
+}
+
+interface AniListRelationEdge {
+  relationType: string | null;
+  node: {
+    id: number;
+    idMal: number | null;
+    type: string | null;
+    format: string | null;
+    episodes: number | null;
+    status: string | null;
+    startDate?: AniListDate | null;
+    title?: {
+      romaji: string | null;
+      english: string | null;
+      native: string | null;
+    } | null;
+  } | null;
+}
+
 interface AniListMediaNode {
   id: number;
   idMal: number | null;
@@ -81,6 +105,7 @@ interface AniListMediaNode {
   episodes: number | null;
   status: string | null;
   seasonYear: number | null;
+  startDate?: AniListDate | null;
   averageScore: number | null;
   genres: string[] | null;
   description: string | null;
@@ -100,6 +125,9 @@ interface AniListMediaNode {
     thumbnail: string | null;
     url: string | null;
   }> | null;
+  relations?: {
+    edges?: AniListRelationEdge[] | null;
+  } | null;
 }
 
 function mapAniListToSearchResult(node: AniListMediaNode): SearchResult {
@@ -232,6 +260,11 @@ async function fetchAniListMediaById(
         episodes
         status
         seasonYear
+        startDate {
+          year
+          month
+          day
+        }
         averageScore
         genres
         description(asHtml: false)
@@ -249,6 +282,29 @@ async function fetchAniListMediaById(
           title
           thumbnail
           url
+        }
+        relations {
+          edges {
+            relationType
+            node {
+              id
+              idMal
+              type
+              format
+              episodes
+              status
+              startDate {
+                year
+                month
+                day
+              }
+              title {
+                romaji
+                english
+                native
+              }
+            }
+          }
         }
       }
     }
@@ -273,6 +329,77 @@ async function fetchAniListMediaById(
   } catch {
     return null;
   }
+}
+
+function aniStartDateSortKey(node: AniListMediaNode): number {
+  const y = node.startDate?.year ?? node.seasonYear ?? 9999;
+  const m = node.startDate?.month ?? 12;
+  const d = node.startDate?.day ?? 31;
+  return y * 10000 + m * 100 + d;
+}
+
+async function fetchAniListFranchiseChain(
+  rootAniId: number | null,
+  titleCandidates: string[],
+  maxNodes = 10
+): Promise<AniListMediaNode[]> {
+  let seedId = rootAniId;
+  if (!seedId) {
+    for (const q of titleCandidates) {
+      if (!q.trim()) continue;
+      const hits = await searchAniList(q.trim(), 5);
+      const best = hits.find(
+        (h) =>
+          h.media_type === "anime" &&
+          titleSimilarityScore(q, [h.title, ...h.aliases]) >= 65
+      );
+      if (best) {
+        const parsed = parseInt(best.external_id, 10);
+        if (!Number.isNaN(parsed)) {
+          seedId = parsed;
+          break;
+        }
+      }
+    }
+  }
+  if (!seedId) return [];
+
+  const visited = new Map<number, AniListMediaNode>();
+  const queued = new Set<number>([seedId]);
+  let frontier: number[] = [seedId];
+
+  while (frontier.length > 0 && visited.size < maxNodes) {
+    const batch = frontier.slice(0, Math.min(frontier.length, maxNodes - visited.size));
+    frontier = frontier.slice(batch.length);
+    const fetched = await Promise.all(batch.map((id) => fetchAniListMediaById(id)));
+
+    for (const node of fetched) {
+      if (!node) continue;
+      visited.set(node.id, node);
+
+      for (const edge of node.relations?.edges || []) {
+        const rel = edge.relationType;
+        const target = edge.node;
+        if (
+          (rel === "PREQUEL" || rel === "SEQUEL") &&
+          target &&
+          target.type === "ANIME" &&
+          (target.format === "TV" || target.format === "TV_SHORT") &&
+          !queued.has(target.id) &&
+          visited.size + frontier.length < maxNodes
+        ) {
+          queued.add(target.id);
+          frontier.push(target.id);
+        }
+      }
+    }
+  }
+
+  return Array.from(visited.values()).sort((a, b) => {
+    const ka = aniStartDateSortKey(a);
+    const kb = aniStartDateSortKey(b);
+    return ka !== kb ? ka - kb : a.id - b.id;
+  });
 }
 
 // ============================================================================
@@ -410,6 +537,176 @@ async function fetchJikanEpisodes(
   }
 
   return episodes;
+}
+
+// ============================================================================
+// 2b. Kitsu API (cross-validation & episode metadata)
+// ============================================================================
+
+interface KitsuAnimeRecord {
+  id: string;
+  attributes: {
+    canonicalTitle?: string;
+    titles?: {
+      en?: string;
+      en_jp?: string;
+      ja_jp?: string;
+    };
+    subtype?: string;
+    status?: string;
+    episodeCount?: number | null;
+    startDate?: string | null;
+  };
+}
+
+interface KitsuEpisodeRecord {
+  id: string;
+  attributes: {
+    number?: number | null;
+    seasonNumber?: number | null;
+    canonicalTitle?: string | null;
+    titles?: {
+      en_us?: string;
+      en_jp?: string;
+    };
+    synopsis?: string | null;
+    airdate?: string | null;
+    length?: number | null;
+    thumbnail?: {
+      original?: string;
+    } | null;
+  };
+}
+
+async function searchKitsuAnime(
+  query: string,
+  limit = 12
+): Promise<KitsuAnimeRecord[]> {
+  try {
+    const url = `https://kitsu.io/api/edge/anime?filter[text]=${encodeURIComponent(
+      query
+    )}&page[limit]=${limit}`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/vnd.api+json" },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      cache: "no-store",
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as { data?: KitsuAnimeRecord[] };
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchKitsuEpisodes(
+  kitsuId: string,
+  maxPages = 3
+): Promise<
+  Array<{
+    episode: number;
+    title: string | null;
+    aired_at: string | null;
+    duration_min: number | null;
+    thumbnail: string | null;
+    overview: string | null;
+  }>
+> {
+  const out: Array<{
+    episode: number;
+    title: string | null;
+    aired_at: string | null;
+    duration_min: number | null;
+    thumbnail: string | null;
+    overview: string | null;
+  }> = [];
+
+  for (let page = 0; page < maxPages; page++) {
+    try {
+      const offset = page * 20;
+      const url = `https://kitsu.io/api/edge/anime/${encodeURIComponent(
+        kitsuId
+      )}/episodes?page[limit]=20&page[offset]=${offset}&sort=number`;
+      const res = await fetch(url, {
+        headers: { Accept: "application/vnd.api+json" },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        cache: "no-store",
+      });
+      if (!res.ok) break;
+      const json = (await res.json()) as {
+        data?: KitsuEpisodeRecord[];
+        links?: { next?: string };
+      };
+      const items = json.data || [];
+      for (const item of items) {
+        const num = item.attributes.number;
+        if (typeof num === "number" && num > 0) {
+          out.push({
+            episode: num,
+            title:
+              item.attributes.canonicalTitle ||
+              item.attributes.titles?.en_us ||
+              item.attributes.titles?.en_jp ||
+              null,
+            aired_at: item.attributes.airdate || null,
+            duration_min: item.attributes.length ?? null,
+            thumbnail: item.attributes.thumbnail?.original || null,
+            overview: item.attributes.synopsis || null,
+          });
+        }
+      }
+      if (!json.links?.next || items.length < 20) break;
+    } catch {
+      break;
+    }
+  }
+
+  return out;
+}
+
+async function fetchKitsuFranchiseCrossCheck(
+  titleCandidates: string[]
+): Promise<{
+  totalEpisodes: number;
+  tvEntries: KitsuAnimeRecord[];
+  isReleasing: boolean;
+}> {
+  const primary = titleCandidates.find((t) => t.trim().length > 0)?.trim();
+  if (!primary) return { totalEpisodes: 0, tvEntries: [], isReleasing: false };
+
+  const records = await searchKitsuAnime(primary, 12);
+  const seenIds = new Set<string>();
+  const tvEntries = records
+    .filter((rec) => {
+      if (seenIds.has(rec.id)) return false;
+      if (rec.attributes.subtype !== "TV") return false;
+      const titles = [
+        rec.attributes.canonicalTitle,
+        rec.attributes.titles?.en,
+        rec.attributes.titles?.en_jp,
+      ].filter((v): v is string => Boolean(v && v.trim()));
+      const bestSim = Math.max(
+        ...titleCandidates.map((q) => titleSimilarityScore(q, titles)),
+        0
+      );
+      if (bestSim < 70) return false;
+      seenIds.add(rec.id);
+      return true;
+    })
+    .sort((a, b) =>
+      (a.attributes.startDate || "9999").localeCompare(
+        b.attributes.startDate || "9999"
+      )
+    );
+
+  const totalEpisodes = tvEntries.reduce(
+    (sum, rec) => sum + (rec.attributes.episodeCount || 0),
+    0
+  );
+  const isReleasing = tvEntries.some(
+    (rec) => rec.attributes.status === "current"
+  );
+  return { totalEpisodes, tvEntries, isReleasing };
 }
 
 // ============================================================================
@@ -729,6 +1026,144 @@ export async function enrichTMDBResult(
   return result;
 }
 
+interface TMDBTVSeasonEpisode {
+  episode_number: number;
+  season_number: number;
+  name?: string;
+  air_date?: string;
+  runtime?: number;
+  still_path?: string | null;
+  overview?: string;
+}
+
+interface TMDBMultiSeasonCatalog {
+  tmdbId: number;
+  status: string | null;
+  totalEpisodes: number | null;
+  seasons: Array<{
+    seasonNumber: number;
+    episodes: RawCatalogEpisode[];
+  }>;
+}
+
+async function fetchTMDBSeasonsByShowId(
+  tmdbId: string,
+  minSeasonToInclude = 1
+): Promise<TMDBMultiSeasonCatalog | null> {
+  const details = await tmdbFetch<TMDBTVDetails>(
+    `/tv/${tmdbId}?language=pt-BR`
+  );
+  if (!details) return null;
+
+  const regularSeasons = (details.seasons || [])
+    .map((s) => s.season_number)
+    .filter((n) => n >= 1)
+    .sort((a, b) => a - b);
+
+  const seasonsToFetch =
+    regularSeasons.length > 0
+      ? regularSeasons.slice(0, 15)
+      : [Math.max(1, minSeasonToInclude)];
+  if (
+    minSeasonToInclude > 0 &&
+    !seasonsToFetch.includes(minSeasonToInclude) &&
+    minSeasonToInclude <= 15
+  ) {
+    seasonsToFetch.push(minSeasonToInclude);
+    seasonsToFetch.sort((a, b) => a - b);
+  }
+
+  const seasonResponses = await Promise.all(
+    seasonsToFetch.map((sNum) =>
+      tmdbFetch<{ episodes?: TMDBTVSeasonEpisode[] }>(
+        `/tv/${tmdbId}/season/${sNum}?language=pt-BR`
+      )
+    )
+  );
+
+  const seasons: Array<{ seasonNumber: number; episodes: RawCatalogEpisode[] }> =
+    [];
+  seasonResponses.forEach((sJson, idx) => {
+    const sNum = seasonsToFetch[idx];
+    const eps: RawCatalogEpisode[] = [];
+    for (const ep of sJson?.episodes || []) {
+      if (!Number.isFinite(ep.episode_number) || ep.episode_number <= 0) {
+        continue;
+      }
+      const airDate = ep.air_date || null;
+      eps.push({
+        season: ep.season_number || sNum,
+        episode: ep.episode_number,
+        title: ep.name || null,
+        aired_at: airDate,
+        air_date: airDate,
+        is_upcoming: computeIsUpcoming(airDate),
+        duration_min: ep.runtime ?? null,
+        thumbnail: ep.still_path
+          ? `https://image.tmdb.org/t/p/w300${ep.still_path}`
+          : null,
+        overview: ep.overview || null,
+      });
+    }
+    if (eps.length > 0) {
+      eps.sort((a, b) => a.episode - b.episode);
+      seasons.push({ seasonNumber: sNum, episodes: eps });
+    }
+  });
+
+  return {
+    tmdbId: details.id,
+    status: details.status || null,
+    totalEpisodes:
+      typeof details.number_of_episodes === "number"
+        ? details.number_of_episodes
+        : null,
+    seasons,
+  };
+}
+
+async function fetchTMDBShowMultiSeasonByTitles(
+  titleCandidates: string[],
+  isAnime: boolean,
+  minSeasonToInclude = 1
+): Promise<TMDBMultiSeasonCatalog | null> {
+  if (!isTMDBConfigured()) return null;
+
+  const queries = Array.from(
+    new Set(titleCandidates.map((t) => t.trim()).filter(Boolean))
+  ).slice(0, 2);
+  if (queries.length === 0) return null;
+
+  let bestItem: TMDBMultiItem | null = null;
+  let bestScore = 0;
+
+  for (const q of queries) {
+    const json = await tmdbFetch<{ results?: TMDBMultiItem[] }>(
+      `/search/tv?query=${encodeURIComponent(q)}&language=pt-BR&include_adult=false`
+    );
+    for (const hit of json?.results || []) {
+      const names = [hit.name, hit.original_name].filter(
+        (v): v is string => Boolean(v && v.trim())
+      );
+      let score = Math.max(
+        ...queries.map((cand) => titleSimilarityScore(cand, names)),
+        0
+      );
+      if (isAnime && hit.genre_ids?.includes(16)) {
+        score += 6;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestItem = hit;
+      }
+    }
+    if (bestScore >= 90) break;
+  }
+
+  if (!bestItem || bestScore < 65) return null;
+  return fetchTMDBSeasonsByShowId(String(bestItem.id), minSeasonToInclude);
+}
+
 // ============================================================================
 // Unified Search, Best Match & Episode Catalog Fetchers
 // ============================================================================
@@ -874,7 +1309,7 @@ export async function fetchMediaCatalogAndAiring(
     | "total_episodes"
     | "current_season"
     | "current_episode"
-  >
+  > & { title?: string; aliases?: string[] }
 ): Promise<MediaCatalogAndAiring> {
   const map = new Map<string, RawCatalogEpisode>();
   let nextAiring: NextAiringInfo | null = null;
@@ -891,8 +1326,9 @@ export async function fetchMediaCatalogAndAiring(
     patch: Partial<RawCatalogEpisode>
   ) => {
     if (!Number.isFinite(episode) || episode <= 0) return;
-    const normalizedSeason = isAnime ? 1 : Math.max(1, season || 1);
-    const key = `${normalizedSeason}:${episode}`;
+    const normalizedSeason = Math.max(1, Math.floor(season || 1));
+    const normalizedEpisode = Math.floor(episode);
+    const key = `${normalizedSeason}:${normalizedEpisode}`;
     const prev = map.get(key);
     const airDate = patch.air_date ?? prev?.air_date ?? null;
     const airedAt =
@@ -901,7 +1337,7 @@ export async function fetchMediaCatalogAndAiring(
       (airDate ? airDate.slice(0, 10) : null);
     map.set(key, {
       season: normalizedSeason,
-      episode,
+      episode: normalizedEpisode,
       title: patch.title ?? prev?.title ?? null,
       aired_at: airedAt,
       air_date: airDate,
@@ -915,71 +1351,276 @@ export async function fetchMediaCatalogAndAiring(
     });
   };
 
-  if (media.provider === "anilist" && media.external_id) {
-    const aniId = parseInt(media.external_id, 10);
-    if (!Number.isNaN(aniId)) {
-      const ani = await fetchAniListMediaById(aniId);
-      if (ani) {
-        airingStatus = ani.status || null;
-        if (typeof ani.episodes === "number") {
-          totalEpisodes = Math.max(totalEpisodes || 0, ani.episodes);
-        }
-        if (ani.nextAiringEpisode) {
-          const iso = new Date(
-            ani.nextAiringEpisode.airingAt * 1000
-          ).toISOString();
-          nextAiring = {
-            episode: ani.nextAiringEpisode.episode,
-            airing_at: iso,
-          };
-          putEp(1, ani.nextAiringEpisode.episode, {
-            air_date: iso,
-            aired_at: iso.slice(0, 10),
-            is_upcoming: true,
-          });
-        }
-        for (const node of ani.airingSchedule?.nodes || []) {
-          const iso = new Date(node.airingAt * 1000).toISOString();
-          putEp(1, node.episode, {
-            air_date: iso,
-            aired_at: iso.slice(0, 10),
-            is_upcoming: computeIsUpcoming(iso),
-          });
-        }
-        if (ani.streamingEpisodes) {
-          ani.streamingEpisodes.forEach((se, idx) => {
-            const parsed = parseStreamingEpNumber(se.title);
-            const epNum = parsed.episode ?? idx + 1;
-            putEp(1, epNum, {
-              title: parsed.cleanTitle || se.title || null,
-              thumbnail: se.thumbnail || null,
-            });
-          });
-        }
-      }
-      const malId = media.mal_id || ani?.idMal || null;
-      if (malId) {
-        const jikanEps = await fetchJikanEpisodes(malId, 4);
-        for (const je of jikanEps) {
-          putEp(1, je.episode, {
-            title: je.title,
-            aired_at: je.aired_at,
-            air_date: je.air_date,
-          });
-        }
-      }
+  if (isAnime && media.media_type !== "movie") {
+    const titleCandidates = Array.from(
+      new Set(
+        [media.title, ...(media.aliases || [])]
+          .map((t) => t?.trim())
+          .filter((t): t is string => Boolean(t && t !== "Título Desconhecido"))
+      )
+    );
+
+    const rootAniId =
+      media.provider === "anilist" && media.external_id
+        ? parseInt(media.external_id, 10) || null
+        : null;
+    const primaryMalId =
+      media.mal_id ||
+      (media.provider === "jikan" && media.external_id
+        ? parseInt(media.external_id, 10) || null
+        : null);
+    const tmdbDirectId =
+      media.provider === "tmdb" && media.external_id?.startsWith("tv:")
+        ? media.external_id.split(":")[1]
+        : null;
+
+    // Cross-validate across AniList (full franchise chain), TMDB (pt-BR multi-season), Kitsu, and Jikan
+    const [aniChain, tmdbCatalog, kitsuCheck, primaryJikanEps] =
+      await Promise.all([
+        fetchAniListFranchiseChain(rootAniId, titleCandidates, 10),
+        tmdbDirectId
+          ? fetchTMDBSeasonsByShowId(tmdbDirectId, media.current_season || 1)
+          : fetchTMDBShowMultiSeasonByTitles(
+              titleCandidates,
+              true,
+              media.current_season || 1
+            ),
+        fetchKitsuFranchiseCrossCheck(titleCandidates),
+        primaryMalId ? fetchJikanEpisodes(primaryMalId, 4) : Promise.resolve([]),
+      ]);
+
+    // Filter to released/releasing/scheduled TV entries (ignore unscheduled NOT_YET_RELEASED teasers)
+    const activeAniChain = aniChain.filter(
+      (n) =>
+        n.status !== "NOT_YET_RELEASED" ||
+        Boolean(n.nextAiringEpisode) ||
+        (n.airingSchedule?.nodes?.length || 0) > 0
+    );
+
+    // Build per-cour data from AniList franchise chain
+    const courStats = activeAniChain.map((node) => {
+      const schedMax = (node.airingSchedule?.nodes || []).reduce(
+        (m, n) => Math.max(m, n.episode),
+        0
+      );
+      const streamMax = node.streamingEpisodes?.length || 0;
+      const nextEpNum = node.nextAiringEpisode?.episode || 0;
+      const count =
+        typeof node.episodes === "number" && node.episodes > 0
+          ? node.episodes
+          : Math.max(schedMax, streamMax, nextEpNum, node.status === "RELEASING" ? 12 : 0);
+      return { node, count };
+    });
+
+    const aniTotal = courStats.reduce((sum, c) => sum + c.count, 0);
+    const hasReleasingAni = activeAniChain.some(
+      (n) => n.status === "RELEASING" || Boolean(n.nextAiringEpisode)
+    );
+    if (hasReleasingAni) {
+      airingStatus = "RELEASING";
+    } else if (activeAniChain.length > 0) {
+      airingStatus = activeAniChain[activeAniChain.length - 1].status || null;
+    } else if (kitsuCheck.isReleasing) {
+      airingStatus = "RELEASING";
+    } else if (tmdbCatalog?.status) {
+      airingStatus = tmdbCatalog.status;
     }
-  } else if (media.provider === "jikan" && media.external_id) {
-    const malId = parseInt(media.external_id, 10);
-    if (!Number.isNaN(malId)) {
-      const jikanEps = await fetchJikanEpisodes(malId, 4);
-      for (const je of jikanEps) {
+
+    // Flatten AniList chain schedule/streaming metadata with cumulative offsets
+    const aniFlatByAbs = new Map<number, Partial<RawCatalogEpisode>>();
+    let runningOffset = 0;
+    for (const { node, count } of courStats) {
+      for (const sNode of node.airingSchedule?.nodes || []) {
+        const absEp = runningOffset + sNode.episode;
+        const iso = new Date(sNode.airingAt * 1000).toISOString();
+        aniFlatByAbs.set(absEp, {
+          ...(aniFlatByAbs.get(absEp) || {}),
+          air_date: iso,
+          aired_at: iso.slice(0, 10),
+          is_upcoming: computeIsUpcoming(iso),
+        });
+      }
+      if (node.nextAiringEpisode) {
+        const absEp = runningOffset + node.nextAiringEpisode.episode;
+        const iso = new Date(
+          node.nextAiringEpisode.airingAt * 1000
+        ).toISOString();
+        if (!nextAiring) {
+          nextAiring = { episode: absEp, airing_at: iso };
+        }
+        aniFlatByAbs.set(absEp, {
+          ...(aniFlatByAbs.get(absEp) || {}),
+          air_date: iso,
+          aired_at: iso.slice(0, 10),
+          is_upcoming: true,
+        });
+      }
+      (node.streamingEpisodes || []).forEach((se, idx) => {
+        const parsed = parseStreamingEpNumber(se.title);
+        const absEp = runningOffset + (parsed.episode ?? idx + 1);
+        const prev = aniFlatByAbs.get(absEp) || {};
+        aniFlatByAbs.set(absEp, {
+          ...prev,
+          title: prev.title || parsed.cleanTitle || se.title || null,
+          thumbnail: prev.thumbnail || se.thumbnail || null,
+        });
+      });
+      runningOffset += count;
+    }
+
+    const tmdbFlatEps = tmdbCatalog
+      ? tmdbCatalog.seasons.flatMap((s) => s.episodes)
+      : [];
+
+    if (tmdbCatalog && tmdbCatalog.seasons.length > 1) {
+      // Strategy A: TMDB already provides true multi-season breakdown in pt-BR (e.g. Mushoku Tensei S1/S2/S3)
+      let absCursor = 0;
+      for (const s of tmdbCatalog.seasons) {
+        for (const ep of s.episodes) {
+          absCursor += 1;
+          const aniExtra = aniFlatByAbs.get(absCursor);
+          putEp(s.seasonNumber, ep.episode, {
+            ...ep,
+            title: ep.title || aniExtra?.title || null,
+            air_date: ep.air_date || aniExtra?.air_date || null,
+            aired_at: ep.aired_at || aniExtra?.aired_at || null,
+            thumbnail: ep.thumbnail || aniExtra?.thumbnail || null,
+          });
+        }
+      }
+      // Only append a brand-new releasing cour strictly beyond TMDB (avoid 1-2 ep Special/Ep0 offset drift)
+      if (hasReleasingAni && aniTotal - absCursor >= 4) {
+        const nextSeason =
+          tmdbCatalog.seasons[tmdbCatalog.seasons.length - 1].seasonNumber + 1;
+        for (let abs = absCursor + 1; abs <= aniTotal; abs++) {
+          const aniExtra = aniFlatByAbs.get(abs);
+          putEp(nextSeason, abs - absCursor, {
+            title: aniExtra?.title || `Episódio ${abs - absCursor}`,
+            air_date: aniExtra?.air_date || null,
+            aired_at: aniExtra?.aired_at || null,
+            thumbnail: aniExtra?.thumbnail || null,
+            is_upcoming: aniExtra?.is_upcoming,
+          });
+        }
+      }
+    } else if (
+      tmdbCatalog &&
+      tmdbCatalog.seasons.length === 1 &&
+      courStats.length > 1
+    ) {
+      // Strategy B: TMDB has all eps in S1 (e.g. Jujutsu Kaisen S1:59), while AniList splits true TV seasons [24, 23, 12]
+      let cursor = 0;
+      courStats.forEach((cour, idx) => {
+        const seasonNum = idx + 1;
+        const isLast = idx === courStats.length - 1;
+        const sliceCount = isLast
+          ? Math.max(cour.count, tmdbFlatEps.length - cursor)
+          : cour.count;
+        for (let epNum = 1; epNum <= sliceCount; epNum++) {
+          const absIdx = cursor + epNum;
+          const tmdbEp = tmdbFlatEps[absIdx - 1];
+          const aniExtra = aniFlatByAbs.get(absIdx);
+          putEp(seasonNum, epNum, {
+            title:
+              tmdbEp?.title ||
+              aniExtra?.title ||
+              `Episódio ${epNum}`,
+            air_date: aniExtra?.air_date || tmdbEp?.air_date || null,
+            aired_at: aniExtra?.aired_at || tmdbEp?.aired_at || null,
+            duration_min: tmdbEp?.duration_min ?? null,
+            thumbnail: tmdbEp?.thumbnail || aniExtra?.thumbnail || null,
+            overview: tmdbEp?.overview || null,
+            is_upcoming:
+              aniExtra?.is_upcoming ?? tmdbEp?.is_upcoming ?? false,
+          });
+        }
+        cursor += sliceCount;
+      });
+    } else if (tmdbFlatEps.length > 0) {
+      // Strategy C: Single-season anime with TMDB pt-BR + AniList + Jikan overlay
+      tmdbFlatEps.forEach((ep, idx) => {
+        const absIdx = idx + 1;
+        const aniExtra = aniFlatByAbs.get(absIdx);
+        const jikanEp = primaryJikanEps[idx];
+        putEp(ep.season, ep.episode, {
+          ...ep,
+          title: ep.title || aniExtra?.title || jikanEp?.title || null,
+          air_date: aniExtra?.air_date || ep.air_date || jikanEp?.air_date || null,
+          aired_at: aniExtra?.aired_at || ep.aired_at || jikanEp?.aired_at || null,
+          thumbnail: ep.thumbnail || aniExtra?.thumbnail || null,
+        });
+      });
+    } else if (courStats.length > 0) {
+      // Strategy D: No TMDB hit — build multi-season catalog from AniList chain + Jikan + Kitsu
+      const jikanPerCour = await Promise.all(
+        courStats.slice(0, 6).map(({ node }) => {
+          if (node.idMal && node.idMal === primaryMalId && primaryJikanEps.length > 0) {
+            return Promise.resolve(primaryJikanEps);
+          }
+          return node.idMal ? fetchJikanEpisodes(node.idMal, 3) : Promise.resolve([]);
+        })
+      );
+      const kitsuEps =
+        kitsuCheck.tvEntries[0]?.id && primaryJikanEps.length === 0
+          ? await fetchKitsuEpisodes(kitsuCheck.tvEntries[0].id, 3)
+          : [];
+
+      let cursor = 0;
+      courStats.forEach(({ count }, idx) => {
+        const seasonNum = idx + 1;
+        const jikanList = jikanPerCour[idx] || [];
+        const epCount = Math.max(count, jikanList.length, 1);
+        for (let epNum = 1; epNum <= epCount; epNum++) {
+          const absIdx = cursor + epNum;
+          const aniExtra = aniFlatByAbs.get(absIdx);
+          const jEp = jikanList.find((j) => j.episode === epNum) || jikanList[epNum - 1];
+          const kEp = idx === 0 ? kitsuEps.find((k) => k.episode === epNum) : undefined;
+          putEp(seasonNum, epNum, {
+            title:
+              aniExtra?.title ||
+              jEp?.title ||
+              kEp?.title ||
+              `Episódio ${epNum}`,
+            air_date: aniExtra?.air_date || jEp?.air_date || kEp?.aired_at || null,
+            aired_at: aniExtra?.aired_at || jEp?.aired_at || kEp?.aired_at || null,
+            duration_min: kEp?.duration_min ?? null,
+            thumbnail: aniExtra?.thumbnail || kEp?.thumbnail || null,
+            overview: kEp?.overview || null,
+            is_upcoming: aniExtra?.is_upcoming,
+          });
+        }
+        cursor += epCount;
+      });
+    } else if (primaryJikanEps.length > 0) {
+      for (const je of primaryJikanEps) {
         putEp(1, je.episode, {
           title: je.title,
           aired_at: je.aired_at,
           air_date: je.air_date,
         });
       }
+    } else if (kitsuCheck.tvEntries[0]?.id) {
+      const kEps = await fetchKitsuEpisodes(kitsuCheck.tvEntries[0].id, 4);
+      for (const ke of kEps) {
+        putEp(1, ke.episode, {
+          title: ke.title,
+          aired_at: ke.aired_at,
+          air_date: ke.aired_at,
+          duration_min: ke.duration_min,
+          thumbnail: ke.thumbnail,
+          overview: ke.overview,
+        });
+      }
+    }
+
+    const consensusTotal = Math.max(
+      map.size,
+      tmdbCatalog?.totalEpisodes || 0,
+      aniTotal,
+      kitsuCheck.totalEpisodes
+    );
+    if (consensusTotal > 0) {
+      totalEpisodes = consensusTotal;
     }
   } else if (media.provider === "tvmaze" && media.external_id) {
     const show = await fetchTVMazeShowWithEpisodes(media.external_id);
@@ -1015,108 +1656,89 @@ export async function fetchMediaCatalogAndAiring(
           : null,
         overview: movie?.overview || null,
       });
+      totalEpisodes = 1;
     } else if (kind === "tv" && tmdbId) {
-      const details = await tmdbFetch<TMDBTVDetails>(
-        `/tv/${tmdbId}?language=pt-BR`
+      const tmdbCatalog = await fetchTMDBSeasonsByShowId(
+        tmdbId,
+        media.current_season || 1
       );
-      if (details) {
-        airingStatus = details.status || null;
-        if (typeof details.number_of_episodes === "number") {
-          totalEpisodes = details.number_of_episodes;
+      if (tmdbCatalog) {
+        airingStatus = tmdbCatalog.status;
+        if (typeof tmdbCatalog.totalEpisodes === "number") {
+          totalEpisodes = tmdbCatalog.totalEpisodes;
+        }
+        for (const s of tmdbCatalog.seasons) {
+          for (const ep of s.episodes) {
+            putEp(s.seasonNumber, ep.episode, ep);
+          }
         }
       }
-      const regularSeasons = (details?.seasons || [])
-        .map((s) => s.season_number)
-        .filter((n) => n >= 1);
-      const seasonsToFetch =
-        regularSeasons.length > 0
-          ? regularSeasons.slice(0, 8)
-          : [media.current_season || 1];
-      if (
-        media.current_season > 0 &&
-        !seasonsToFetch.includes(media.current_season)
-      ) {
-        seasonsToFetch.push(media.current_season);
-      }
-
-      const seasonResponses = await Promise.all(
-        seasonsToFetch.map((sNum) =>
-          tmdbFetch<{
-            episodes?: Array<{
-              episode_number: number;
-              season_number: number;
-              name?: string;
-              air_date?: string;
-              runtime?: number;
-              still_path?: string | null;
-              overview?: string;
-            }>;
-          }>(`/tv/${tmdbId}/season/${sNum}?language=pt-BR`)
-        )
-      );
-
-      seasonResponses.forEach((sJson, idx) => {
-        const sNum = seasonsToFetch[idx];
-        for (const ep of sJson?.episodes || []) {
-          const airDate = ep.air_date || null;
-          putEp(ep.season_number || sNum, ep.episode_number, {
-            title: ep.name || null,
-            aired_at: airDate,
-            air_date: airDate,
-            duration_min: ep.runtime ?? null,
-            thumbnail: ep.still_path
-              ? `https://image.tmdb.org/t/p/w300${ep.still_path}`
-              : null,
-            overview: ep.overview || null,
-          });
-        }
-      });
     }
   }
 
-  // Fill numbered placeholders up to total_episodes (or current_episode)
-  // using unified season 1 for animes so there is never a split across seasons.
-  const placeholderSeason = isAnime ? 1 : media.current_season || 1;
-  const maxMappedEp = Array.from(map.values()).reduce(
-    (acc, e) =>
-      e.season === placeholderSeason ? Math.max(acc, e.episode) : acc,
-    0
-  );
-  const targetCount = Math.max(
-    totalEpisodes || 0,
-    media.current_episode || 0,
-    maxMappedEp
-  );
-  if (media.current_episode > (totalEpisodes || 0)) {
-    totalEpisodes = targetCount;
-  }
-  const hasFullProviderCatalog =
-    (media.provider === "tvmaze" || media.provider === "tmdb") && map.size > 0;
-  if (
-    map.size === 0 ||
-    (!hasFullProviderCatalog && targetCount > 0 && targetCount <= 500)
-  ) {
-    const fillCount = Math.min(Math.max(targetCount, map.size || 12), 500);
+  // Only fill placeholder season episodes if catalog is empty, respecting media.current_season
+  if (map.size === 0) {
+    const targetSeason = Math.max(1, media.current_season || 1);
+    const fillCount = Math.min(
+      Math.max(totalEpisodes || 0, media.current_episode || 0, 12),
+      500
+    );
     for (let ep = 1; ep <= fillCount; ep++) {
-      if (!map.has(`${placeholderSeason}:${ep}`) && !hasFullProviderCatalog) {
-        putEp(placeholderSeason, ep, { title: `Episódio ${ep}` });
+      putEp(targetSeason, ep, { title: `Episódio ${ep}` });
+    }
+  }
+
+  // Ensure if current_season is strictly greater than max catalog season AND current_episode isn't already accounted for
+  const maxCatalogSeason = Array.from(map.values()).reduce(
+    (m, e) => Math.max(m, e.season),
+    1
+  );
+  if (
+    media.current_season > maxCatalogSeason &&
+    media.current_episode > map.size
+  ) {
+    for (let s = maxCatalogSeason + 1; s <= media.current_season; s++) {
+      const targetLen =
+        s === media.current_season ? Math.max(12, media.current_episode) : 12;
+      for (let ep = 1; ep <= Math.min(targetLen, 100); ep++) {
+        putEp(s, ep, { title: `Episódio ${ep}` });
       }
     }
   }
 
-  const episodes = Array.from(map.values()).sort((a, b) =>
-    a.season !== b.season ? a.season - b.season : a.episode - b.episode
-  );
+  // Sort continuously by (season, episode) and assign abs_episode = 1..N
+  const episodes = Array.from(map.values())
+    .sort((a, b) =>
+      a.season !== b.season ? a.season - b.season : a.episode - b.episode
+    )
+    .map((ep, idx) => ({
+      ...ep,
+      abs_episode: idx + 1,
+    }));
 
-  // If next_airing wasn't provided directly (e.g. TMDB/TVMaze), derive from earliest upcoming episode
+  // If next_airing wasn't set by AniList, derive from earliest upcoming catalog episode
   if (!nextAiring) {
     const nextUpcoming = episodes.find((e) => e.is_upcoming && e.air_date);
     if (nextUpcoming && nextUpcoming.air_date) {
       nextAiring = {
-        episode: nextUpcoming.episode,
+        episode: nextUpcoming.abs_episode ?? nextUpcoming.episode,
         airing_at: nextUpcoming.air_date,
       };
     }
+  }
+
+  if (episodes.some((e) => e.is_upcoming)) {
+    airingStatus = "RELEASING";
+  }
+
+  if (
+    airingStatus === "RELEASING" &&
+    episodes.length > 0 &&
+    episodes.length <= media.current_episode
+  ) {
+    totalEpisodes = null;
+  } else if (episodes.length > 0) {
+    totalEpisodes = episodes.length;
   }
 
   return {
@@ -1137,7 +1759,7 @@ export async function fetchCatalogEpisodes(
     | "total_episodes"
     | "current_season"
     | "current_episode"
-  >
+  > & { title?: string; aliases?: string[] }
 ): Promise<RawCatalogEpisode[]> {
   const { episodes } = await fetchMediaCatalogAndAiring(media);
   return episodes;

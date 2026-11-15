@@ -5,9 +5,7 @@ import {
   Calendar,
   Check,
   ChevronRight,
-  LayoutGrid,
   Link2,
-  List,
   ListVideo,
   RefreshCw,
   Search,
@@ -25,11 +23,14 @@ import type {
 import {
   formatAbsoluteTimePt,
   formatReleaseDatePt,
+  formatSeasonEpisodeLabel,
   formatTimecode,
   getAppMeta,
+  getEpisodeAbsNumber,
   getMediaTypeLabelPt,
   getProviderLabel,
   getStatusLabelPt,
+  resolveCurrentEpisodePosition,
   stripHtml,
 } from "./formatters";
 import { useDialogAccessibility } from "./useFocusTrap";
@@ -89,13 +90,6 @@ function MediaDetailModalInner({
   const [epLoading, setEpLoading] = useState(!hasCachedOnMount);
   const [epRefreshing, setEpRefreshing] = useState(false);
   const [epError, setEpError] = useState<string | null>(null);
-  const [selectedSeason, setSelectedSeason] = useState<number | "all">("all");
-  const [episodeViewMode, setEpisodeViewMode] = useState<"list" | "matrix">(
-    "list"
-  );
-  const [matrixClickMode, setMatrixClickMode] = useState<"up_to" | "toggle">(
-    "up_to"
-  );
   const [togglingKey, setTogglingKey] = useState<string | null>(null);
   const [markingUpToKey, setMarkingUpToKey] = useState<string | null>(null);
 
@@ -103,6 +97,15 @@ function MediaDetailModalInner({
     if (localEpisodes !== null) return localEpisodes;
     return Array.isArray(media.catalog_episodes) ? media.catalog_episodes : [];
   }, [localEpisodes, media.catalog_episodes]);
+
+  const currentPos = useMemo(
+    () =>
+      resolveCurrentEpisodePosition({
+        ...media,
+        catalog_episodes: episodes.length > 0 ? episodes : media.catalog_episodes,
+      }),
+    [media, episodes]
+  );
 
   const [draftSeason, setDraftSeason] = useState<string | null>(null);
   const [draftEpisode, setDraftEpisode] = useState<string | null>(null);
@@ -121,8 +124,8 @@ function MediaDetailModalInner({
   const [rematchError, setRematchError] = useState<string | null>(null);
   const [rematchingId, setRematchingId] = useState<string | null>(null);
 
-  const manualSeason = draftSeason ?? String(media.current_season || 1);
-  const manualEpisode = draftEpisode ?? String(media.current_episode || 0);
+  const manualSeason = draftSeason ?? String(currentPos.season || 1);
+  const manualEpisode = draftEpisode ?? String(currentPos.episode || 0);
 
   useDialogAccessibility(true, dialogRef, onClose);
 
@@ -264,14 +267,6 @@ function MediaDetailModalInner({
     onEpisodesUpdated,
   ]);
 
-  const seasons = useMemo(() => {
-    const set = new Set<number>();
-    episodes.forEach((ep) => set.add(ep.season));
-    return Array.from(set).sort((a, b) => a - b);
-  }, [episodes]);
-
-  const showSeasonControls = media.media_type !== "anime" && seasons.length > 1;
-
   const watchedCount = useMemo(
     () => episodes.filter((ep) => ep.watched).length,
     [episodes]
@@ -282,28 +277,18 @@ function MediaDetailModalInner({
       ? media.total_episodes
       : episodes.length;
 
-  const formatEpBadge = (season: number, episode: number) => {
-    const epPadded = String(episode).padStart(2, "0");
-    return showSeasonControls ? `T${season} · EP ${epPadded}` : `EP ${epPadded}`;
-  };
-
-  const filteredEpisodes = useMemo(() => {
-    if (!showSeasonControls || selectedSeason === "all") return episodes;
-    return episodes.filter((ep) => ep.season === selectedSeason);
-  }, [episodes, selectedSeason, showSeasonControls]);
-
   const nextEpisode = useMemo(() => {
-    const releasedUnwatchedAfterCurrent = episodes.find(
-      (ep) =>
-        !ep.watched && !ep.is_upcoming && ep.episode > media.current_episode
-    );
+    const releasedUnwatchedAfterCurrent = episodes.find((ep, idx) => {
+      const absNum = getEpisodeAbsNumber(ep, idx + 1);
+      return !ep.watched && !ep.is_upcoming && absNum > currentPos.absEpisode;
+    });
     if (releasedUnwatchedAfterCurrent) return releasedUnwatchedAfterCurrent;
     const anyReleasedUnwatched = episodes.find(
       (ep) => !ep.watched && !ep.is_upcoming
     );
     if (anyReleasedUnwatched) return anyReleasedUnwatched;
     return null;
-  }, [episodes, media.current_episode]);
+  }, [episodes, currentPos.absEpisode]);
 
   if (!media) return null;
 
@@ -318,10 +303,8 @@ function MediaDetailModalInner({
     const nowIso = new Date().toISOString();
     return list.map((item) => {
       const isWatchedUpToHere =
-        media.media_type === "anime"
-          ? item.episode <= targetEpisode
-          : item.season < targetSeason ||
-            (item.season === targetSeason && item.episode <= targetEpisode);
+        item.season < targetSeason ||
+        (item.season === targetSeason && item.episode <= targetEpisode);
       return {
         ...item,
         watched: isWatchedUpToHere,
@@ -387,10 +370,7 @@ function MediaDetailModalInner({
 
   const handleManualProgressSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const s =
-      media.media_type === "anime"
-        ? media.current_season || 1
-        : Math.max(1, Number.parseInt(manualSeason, 10) || 1);
+    const s = Math.max(1, Number.parseInt(manualSeason, 10) || 1);
     const ep = Math.max(0, Number.parseInt(manualEpisode, 10) || 0);
     setSavingProgress(true);
     const updated = await onPatchMedia(media.id, {
@@ -652,31 +632,24 @@ function MediaDetailModalInner({
                   onSubmit={handleManualProgressSubmit}
                   className="space-y-1.5"
                 >
-                  <span className="block text-xs font-semibold text-[#A8B0C2]">
-                    Ajustar episódio manualmente
+                  <span className="block text-xs font-semibold text-[#9CA3AF]">
+                    Ajustar temporada e episódio manualmente
                   </span>
                   <div className="flex items-center gap-2">
-                    {media.media_type !== "anime" && (
-                      <>
-                        <label htmlFor="manual-season-input" className="sr-only">
-                          Temporada
-                        </label>
-                        <input
-                          id="manual-season-input"
-                          type="number"
-                          min={1}
-                          value={manualSeason}
-                          onChange={(e) => setDraftSeason(e.target.value)}
-                          className="min-h-[44px] w-16 rounded-lg border border-[#373D52] bg-[#13151C] px-2.5 py-2 text-center font-mono text-sm text-[#F4F5F7]"
-                          title="Temporada"
-                        />
-                      </>
-                    )}
-                    <span className="text-xs font-semibold text-[#A8B0C2]">
-                      EP
-                    </span>
-                    <label htmlFor="manual-episode-input" className="sr-only">
-                      Episódio
+                    <label htmlFor="manual-season-input" className="text-xs font-medium text-[#9CA3AF]">
+                      Temp
+                    </label>
+                    <input
+                      id="manual-season-input"
+                      type="number"
+                      min={1}
+                      value={manualSeason}
+                      onChange={(e) => setDraftSeason(e.target.value)}
+                      className="min-h-[44px] w-16 rounded-lg border border-[#22252D] bg-[#0B0C0E] px-2.5 py-2 text-center font-mono text-sm text-[#F3F4F6]"
+                      title="Temporada"
+                    />
+                    <label htmlFor="manual-episode-input" className="text-xs font-medium text-[#9CA3AF]">
+                      Ep
                     </label>
                     <input
                       id="manual-episode-input"
@@ -684,13 +657,13 @@ function MediaDetailModalInner({
                       min={0}
                       value={manualEpisode}
                       onChange={(e) => setDraftEpisode(e.target.value)}
-                      className="min-h-[44px] w-20 rounded-lg border border-[#373D52] bg-[#13151C] px-2.5 py-2 text-center font-mono text-sm text-[#F4F5F7]"
+                      className="min-h-[44px] w-20 rounded-lg border border-[#22252D] bg-[#0B0C0E] px-2.5 py-2 text-center font-mono text-sm text-[#F3F4F6]"
                       title="Episódio"
                     />
                     <button
                       type="submit"
                       disabled={savingProgress}
-                      className="min-h-[44px] flex-1 rounded-lg bg-[#1B1E28] px-3 py-2 text-xs font-bold text-[#F4F5F7] border border-[#373D52] hover:bg-[#262A38] disabled:opacity-60"
+                      className="min-h-[44px] flex-1 rounded-lg border border-[#22252D] bg-[#1A1D24] px-3 py-2 text-xs font-semibold text-[#F3F4F6] hover:border-[#2E323D] disabled:opacity-60"
                     >
                       {savingProgress ? "Salvando..." : "Salvar"}
                     </button>
@@ -699,13 +672,12 @@ function MediaDetailModalInner({
               </div>
 
               {nextEpisode && (
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#F47521]/45 bg-[#F47521]/10 p-3.5">
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#22252D] bg-[#0B0C0E] p-3.5">
                   <div className="min-w-0 space-y-0.5">
-                    <p className="font-mono text-xs font-bold text-[#FF9248]">
-                      Próximo:{" "}
-                      {formatEpBadge(nextEpisode.season, nextEpisode.episode)}
+                    <p className="text-xs font-semibold text-[#F47521]">
+                      Próximo: {formatSeasonEpisodeLabel(nextEpisode.season, nextEpisode.episode)}
                     </p>
-                    <p className="truncate text-sm font-semibold text-[#F4F5F7]">
+                    <p className="truncate text-sm font-semibold text-[#F3F4F6]">
                       {nextEpisode.title || `Episódio ${nextEpisode.episode}`}
                     </p>
                   </div>
@@ -716,7 +688,7 @@ function MediaDetailModalInner({
                       `${nextEpisode.season}-${nextEpisode.episode}`
                     }
                     onClick={() => handleToggleEpisode(nextEpisode)}
-                    className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg bg-[#F47521] px-3.5 py-2 text-xs font-bold text-[#0B0C10] hover:bg-[#FF8B3D] disabled:opacity-60"
+                    className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg bg-[#F47521] px-3.5 py-2 text-xs font-semibold text-[#0B0C0E] hover:bg-[#FF8533] disabled:opacity-60"
                   >
                     <Check className="h-4 w-4" aria-hidden="true" />
                     <span>Marcar Ep {nextEpisode.episode} visto</span>
@@ -725,85 +697,17 @@ function MediaDetailModalInner({
               )}
 
               <div className="flex flex-wrap items-center justify-between gap-2.5">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded-lg border border-[#262A38] bg-[#0B0C10]/80 px-2.5 py-1.5 font-mono text-xs font-semibold text-[#F4F5F7]">
-                    {totalCatalogCount > 0
-                      ? `Assistidos: ${watchedCount} / ${totalCatalogCount}`
-                      : `Assistidos: ${watchedCount}`}
-                  </span>
-
-                  <div
-                    role="group"
-                    aria-label="Modo de visualização dos episódios"
-                    className="inline-flex rounded-xl border border-[#262A38] bg-[#0B0C10]/80 p-1"
-                  >
-                    <button
-                      type="button"
-                      aria-pressed={episodeViewMode === "list"}
-                      onClick={() => setEpisodeViewMode("list")}
-                      className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors ${
-                        episodeViewMode === "list"
-                          ? "bg-[#F47521] text-[#0B0C10]"
-                          : "text-[#A8B0C2] hover:text-[#F4F5F7]"
-                      }`}
-                    >
-                      <List className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Lista Detalhada</span>
-                    </button>
-                    <button
-                      type="button"
-                      aria-pressed={episodeViewMode === "matrix"}
-                      onClick={() => setEpisodeViewMode("matrix")}
-                      className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors ${
-                        episodeViewMode === "matrix"
-                          ? "bg-[#F47521] text-[#0B0C10]"
-                          : "text-[#A8B0C2] hover:text-[#F4F5F7]"
-                      }`}
-                    >
-                      <LayoutGrid className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Matriz 1..N</span>
-                    </button>
-                  </div>
-
-                  {showSeasonControls && (
-                    <div
-                      className="flex flex-wrap gap-2"
-                      aria-label="Filtrar por temporada"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setSelectedSeason("all")}
-                        className={`min-h-[44px] rounded-lg px-3 py-1.5 text-xs font-semibold ${
-                          selectedSeason === "all"
-                            ? "bg-[#F47521] text-[#0B0C10]"
-                            : "border border-[#262A38] bg-[#1B1E28] text-[#A8B0C2] hover:text-[#F4F5F7]"
-                        }`}
-                      >
-                        Todas ({episodes.length})
-                      </button>
-                      {seasons.map((s) => (
-                        <button
-                          key={s}
-                          type="button"
-                          onClick={() => setSelectedSeason(s)}
-                          className={`min-h-[44px] rounded-lg px-3 py-1.5 font-mono text-xs font-semibold ${
-                            selectedSeason === s
-                              ? "bg-[#F47521] text-[#0B0C10]"
-                              : "border border-[#262A38] bg-[#1B1E28] text-[#A8B0C2] hover:text-[#F4F5F7]"
-                          }`}
-                        >
-                          Temp {s}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                <span className="text-xs font-medium text-[#9CA3AF]">
+                  {totalCatalogCount > 0
+                    ? `Assistidos: ${watchedCount} de ${totalCatalogCount} episódios`
+                    : `Assistidos: ${watchedCount} episódios`}
+                </span>
 
                 <button
                   type="button"
                   disabled={epRefreshing || epLoading}
                   onClick={() => void loadEpisodes(media.id, true)}
-                  className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#373D52] bg-[#1B1E28] px-3 py-1.5 text-xs font-semibold text-[#F4F5F7] hover:bg-[#262A38] disabled:opacity-60"
+                  className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#22252D] bg-[#1A1D24] px-3 py-1.5 text-xs font-medium text-[#F3F4F6] hover:border-[#2E323D] disabled:opacity-60"
                 >
                   <RefreshCw
                     className={`h-3.5 w-3.5 ${epRefreshing ? "animate-spin" : ""}`}
@@ -816,30 +720,30 @@ function MediaDetailModalInner({
               </div>
 
               {media.next_airing && (
-                <div className="flex items-center gap-2 rounded-xl border border-[#FCD34D]/35 bg-[#0B0C10]/70 px-3.5 py-2.5 text-xs font-semibold text-[#FCD34D]">
+                <p className="inline-flex items-center gap-2 text-xs text-[#9CA3AF]">
                   <Calendar className="h-4 w-4 shrink-0" aria-hidden="true" />
                   <span>
-                    Próximo lançamento: Episódio {media.next_airing.episode} em{" "}
+                    Próximo lançamento (Episódio {media.next_airing.episode}):{" "}
                     {formatReleaseDatePt(media.next_airing.airing_at, true)}
                   </span>
-                </div>
+                </p>
               )}
 
               {epLoading && (
                 <div className="space-y-2 py-4">
-                  <p className="text-sm font-medium text-[#A8B0C2]">
+                  <p className="text-sm font-medium text-[#9CA3AF]">
                     Carregando lista de episódios...
                   </p>
-                  <div className="h-12 w-full rounded-xl bg-[#1B1E28]" />
-                  <div className="h-12 w-full rounded-xl bg-[#1B1E28]" />
-                  <div className="h-12 w-full rounded-xl bg-[#1B1E28]" />
+                  <div className="h-12 w-full rounded-lg bg-[#1A1D24]" />
+                  <div className="h-12 w-full rounded-lg bg-[#1A1D24]" />
+                  <div className="h-12 w-full rounded-lg bg-[#1A1D24]" />
                 </div>
               )}
 
               {!epLoading && epError && (
                 <div
                   role="alert"
-                  className="space-y-3 rounded-xl border border-[#BE123C]/50 bg-[#BE123C]/10 p-4"
+                  className="space-y-3 rounded-lg border border-[#BE123C]/50 bg-[#BE123C]/10 p-4"
                 >
                   <p className="text-sm font-medium text-[#FDA4AF]">
                     {epError}
@@ -847,291 +751,166 @@ function MediaDetailModalInner({
                   <button
                     type="button"
                     onClick={() => loadEpisodes(media.id)}
-                    className="min-h-[44px] rounded-lg border border-[#373D52] bg-[#1B1E28] px-3.5 py-2 text-xs font-semibold text-[#F4F5F7] hover:bg-[#262A38]"
+                    className="min-h-[44px] rounded-lg border border-[#22252D] bg-[#1A1D24] px-3.5 py-2 text-xs font-semibold text-[#F3F4F6]"
                   >
                     Tentar novamente
                   </button>
                 </div>
               )}
 
-              {!epLoading && !epError && filteredEpisodes.length === 0 && (
-                <div className="rounded-xl border border-[#262A38] bg-[#0B0C10]/60 p-5 text-center">
-                  <p className="text-sm font-medium text-[#F4F5F7]">
+              {!epLoading && !epError && episodes.length === 0 && (
+                <div className="rounded-lg border border-[#22252D] bg-[#0B0C0E] p-5 text-center">
+                  <p className="text-sm font-medium text-[#F3F4F6]">
                     Nenhum catálogo detalhado de episódios encontrado para esta
                     obra.
                   </p>
-                  <p className="mt-1 text-xs text-[#A8B0C2]">
+                  <p className="mt-1 text-xs text-[#9CA3AF]">
                     Você ainda pode usar o ajuste manual acima ou clicar em
                     &quot;Trocar / Re-vincular Obra&quot; para buscar outra fonte.
                   </p>
                 </div>
               )}
 
-              {!epLoading &&
-                !epError &&
-                filteredEpisodes.length > 0 &&
-                episodeViewMode === "matrix" && (
-                  <div className="space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#262A38] bg-[#0B0C10]/70 px-3 py-2">
-                      <div className="flex flex-wrap items-center gap-3 text-[11px] font-medium text-[#A8B0C2]">
-                        <span className="inline-flex items-center gap-1.5">
-                          <span className="h-2.5 w-2.5 rounded-sm bg-[#22C55E]" />
-                          Assistido
-                        </span>
-                        <span className="inline-flex items-center gap-1.5">
-                          <span className="h-2.5 w-2.5 rounded-sm bg-[#F47521]" />
-                          Atual / Próximo
-                        </span>
-                        <span className="inline-flex items-center gap-1.5">
-                          <span className="h-2.5 w-2.5 rounded-full bg-[#FCD34D]" />
-                          Em breve
-                        </span>
-                      </div>
-
-                      <div
-                        role="group"
-                        aria-label="Ação ao tocar no episódio da matriz"
-                        className="flex items-center gap-1.5"
-                      >
-                        <span className="text-[11px] font-semibold text-[#A8B0C2]">
-                          Ao tocar:
-                        </span>
-                        <button
-                          type="button"
-                          aria-pressed={matrixClickMode === "up_to"}
-                          onClick={() => setMatrixClickMode("up_to")}
-                          className={`min-h-[36px] rounded-lg px-2.5 py-1 text-[11px] font-bold transition-colors ${
-                            matrixClickMode === "up_to"
-                              ? "bg-[#F47521] text-[#0B0C10]"
-                              : "border border-[#262A38] bg-[#13151C] text-[#A8B0C2] hover:text-[#F4F5F7]"
-                          }`}
-                        >
-                          Até aqui (1..X)
-                        </button>
-                        <button
-                          type="button"
-                          aria-pressed={matrixClickMode === "toggle"}
-                          onClick={() => setMatrixClickMode("toggle")}
-                          className={`min-h-[36px] rounded-lg px-2.5 py-1 text-[11px] font-bold transition-colors ${
-                            matrixClickMode === "toggle"
-                              ? "bg-[#F47521] text-[#0B0C10]"
-                              : "border border-[#262A38] bg-[#13151C] text-[#A8B0C2] hover:text-[#F4F5F7]"
-                          }`}
-                        >
-                          Individual
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-5 gap-2 sm:grid-cols-8 md:grid-cols-10">
-                      {filteredEpisodes.map((ep) => {
-                        const key = `${ep.season}-${ep.episode}`;
-                        const isBusy =
-                          togglingKey === key || markingUpToKey === key;
-                        const isCurrent =
-                          ep.episode === media.current_episode &&
-                          (media.media_type === "anime" ||
-                            ep.season === media.current_season);
-                        const isNext =
-                          nextEpisode &&
-                          nextEpisode.season === ep.season &&
-                          nextEpisode.episode === ep.episode;
-
-                        const tileTitle = `${formatEpBadge(ep.season, ep.episode)}${
-                          ep.title ? ` · ${ep.title}` : ""
-                        }${
-                          ep.is_upcoming && (ep.air_date || ep.aired_at)
-                            ? ` (Lança em ${formatReleaseDatePt(ep.air_date || ep.aired_at)})`
-                            : ""
-                        }`;
-
-                        return (
-                          <button
-                            key={key}
-                            type="button"
-                            disabled={isBusy}
-                            title={tileTitle}
-                            aria-label={tileTitle}
-                            aria-pressed={ep.watched}
-                            onClick={() => {
-                              if (matrixClickMode === "up_to") {
-                                void handleMarkUpToEpisode(ep);
-                              } else {
-                                void handleToggleEpisode(ep);
-                              }
-                            }}
-                            className={`relative flex min-h-[48px] flex-col items-center justify-center rounded-xl border font-mono text-xs font-bold transition-all active:scale-95 disabled:opacity-60 ${
-                              isCurrent
-                                ? "border-[#F47521] bg-[#F47521] text-[#0B0C10] shadow-[0_0_16px_-4px_rgba(244,117,33,0.85)]"
-                                : ep.watched
-                                  ? "border-[#22C55E]/50 bg-[#22C55E]/15 text-[#4ADE80] hover:bg-[#22C55E]/25"
-                                  : isNext
-                                    ? "border-[#F47521]/70 bg-[#1B1E28] text-[#FF9248] hover:bg-[#262A38]"
-                                    : ep.is_upcoming
-                                      ? "border-[#262A38] bg-[#0B0C10]/60 text-[#A8B0C2] hover:border-[#373D52]"
-                                      : "border-[#262A38] bg-[#13151C] text-[#F4F5F7] hover:border-[#373D52] hover:bg-[#1B1E28]"
-                            }`}
-                          >
-                            {isBusy ? (
-                              <span>...</span>
-                            ) : (
-                              <>
-                                <span>
-                                  {String(ep.episode).padStart(2, "0")}
-                                </span>
-                                {showSeasonControls && (
-                                  <span className="text-[9px] opacity-80">
-                                    T{ep.season}
-                                  </span>
-                                )}
-                              </>
-                            )}
-                            {ep.is_upcoming && (
-                              <span
-                                aria-hidden="true"
-                                className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-[#FCD34D]"
-                              />
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-              {!epLoading &&
-                !epError &&
-                filteredEpisodes.length > 0 &&
-                episodeViewMode === "list" && (
+              {!epLoading && !epError && episodes.length > 0 && (
                 <ul className="space-y-2">
-                  {filteredEpisodes.map((ep) => {
+                  {episodes.map((ep, idx) => {
                     const key = `${ep.season}-${ep.episode}`;
+                    const absNumber = getEpisodeAbsNumber(ep, idx + 1);
+                    const showSeasonDivider =
+                      idx === 0 || ep.season !== episodes[idx - 1].season;
+                    const seasonLabel = `Temporada ${String(ep.season).padStart(2, "0")}`;
                     const isNext =
                       nextEpisode &&
                       nextEpisode.season === ep.season &&
                       nextEpisode.episode === ep.episode;
                     const isBusy = togglingKey === key;
                     const isMarkingUpTo = markingUpToKey === key;
-                    const epAppMeta = ep.source_app
-                      ? getAppMeta(ep.source_app)
-                      : null;
 
                     return (
-                      <li key={key} className="flex items-stretch gap-2">
-                        <button
-                          type="button"
-                          disabled={isBusy || isMarkingUpTo}
-                          onClick={() => handleToggleEpisode(ep)}
-                          aria-pressed={ep.watched}
-                          className={`flex min-h-[52px] min-w-0 flex-1 items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-colors ${
-                            ep.watched
-                              ? "border-[#22C55E]/35 bg-[#22C55E]/10 hover:bg-[#22C55E]/15"
-                              : isNext
-                                ? "border-[#F47521]/50 bg-[#1B1E28] hover:bg-[#262A38]"
-                                : "border-[#262A38] bg-[#0B0C10]/60 hover:border-[#373D52] hover:bg-[#1B1E28]"
-                          }`}
-                        >
-                          <div className="flex min-w-0 items-center gap-3">
-                            <span
-                              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md border text-xs font-bold ${
-                                ep.watched
-                                  ? "border-[#22C55E] bg-[#22C55E] text-[#0B0C10]"
-                                  : "border-[#373D52] bg-[#13151C] text-[#A8B0C2]"
-                              }`}
-                              aria-hidden="true"
-                            >
-                              {ep.watched ? (
-                                <Check className="h-4 w-4" />
-                              ) : (
-                                ep.episode
-                              )}
+                      <li key={key} className="space-y-2">
+                        {showSeasonDivider && (
+                          <div className="sticky top-0 z-10 flex items-center justify-between border-b border-[#22252D] bg-[#131519]/95 py-2 backdrop-blur-sm">
+                            <h3 className="text-xs font-bold uppercase tracking-wider text-[#F3F4F6]">
+                              {seasonLabel}
+                            </h3>
+                            <span className="font-mono text-xs text-[#9CA3AF]">
+                              a partir do #{String(absNumber).padStart(2, "0")}
                             </span>
-
-                            {ep.thumbnail && (
-                              <img
-                                src={ep.thumbnail}
-                                alt=""
-                                width={96}
-                                height={54}
-                                loading="lazy"
-                                className="hidden h-10 w-16 shrink-0 rounded-md border border-[#262A38] object-cover sm:block"
-                              />
-                            )}
-
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="font-mono text-xs font-bold text-[#F4F5F7]">
-                                  {formatEpBadge(ep.season, ep.episode)}
-                                </span>
-                                {isNext && !ep.watched && (
-                                  <span className="rounded bg-[#F47521] px-1.5 py-0.5 text-[10px] font-bold text-[#0B0C10]">
-                                    Próximo
-                                  </span>
-                                )}
-                                {ep.is_upcoming && (
-                                  <span className="rounded border border-[#FCD34D]/40 bg-[#0B0C10] px-1.5 py-0.5 text-[10px] font-bold text-[#FCD34D]">
-                                    Em breve
-                                    {ep.air_date || ep.aired_at
-                                      ? ` · Lança em ${formatReleaseDatePt(ep.air_date || ep.aired_at)}`
-                                      : ""}
-                                  </span>
-                                )}
-                                {ep.watched && epAppMeta && (
-                                  <span
-                                    className={`rounded px-1.5 py-0.5 text-[10px] ${epAppMeta.badgeClass}`}
-                                  >
-                                    {epAppMeta.label}
-                                  </span>
-                                )}
-                              </div>
-                              <p className="truncate text-sm font-medium text-[#F4F5F7]">
-                                {ep.title || `Episódio ${ep.episode}`}
-                              </p>
-                              {(ep.watched_at ||
-                                ep.air_date ||
-                                ep.aired_at ||
-                                (ep.position_sec != null &&
-                                  ep.duration_sec != null &&
-                                  ep.duration_sec > 0)) && (
-                                <p className="text-[11px] text-[#A8B0C2]">
-                                  {ep.watched_at
-                                    ? `Assistido em ${formatAbsoluteTimePt(ep.watched_at)}`
-                                    : (ep.air_date || ep.aired_at) && !ep.is_upcoming
-                                      ? `Lançado em ${formatReleaseDatePt(ep.air_date || ep.aired_at)}`
-                                      : ep.is_upcoming && (ep.air_date || ep.aired_at)
-                                        ? `Previsão: ${formatReleaseDatePt(ep.air_date || ep.aired_at, true)}`
-                                        : ""}
-                                  {ep.position_sec != null &&
-                                  ep.duration_sec != null &&
-                                  ep.duration_sec > 0
-                                    ? ` · ${formatTimecode(ep.position_sec)} / ${formatTimecode(ep.duration_sec)}`
-                                    : ""}
-                                </p>
-                              )}
-                            </div>
                           </div>
+                        )}
 
-                          <span className="shrink-0 text-xs font-semibold text-[#A8B0C2]">
-                            {isBusy
-                              ? "..."
-                              : ep.watched
-                                ? "Visto"
-                                : "Marcar"}
-                          </span>
-                        </button>
-
-                        {!ep.watched && !ep.is_upcoming && (
+                        <div className="flex items-stretch gap-2">
                           <button
                             type="button"
                             disabled={isBusy || isMarkingUpTo}
-                            onClick={() => handleMarkUpToEpisode(ep)}
-                            aria-label={`Marcar episódios 1 até ${ep.episode} como assistidos`}
-                            title={`Marcar até aqui (1..Ep ${ep.episode})`}
-                            className="inline-flex min-h-[52px] shrink-0 items-center justify-center rounded-xl border border-[#373D52] bg-[#13151C] px-2.5 text-xs font-semibold text-[#A8B0C2] transition-colors hover:border-[#F47521]/60 hover:bg-[#1B1E28] hover:text-[#F4F5F7] disabled:opacity-60"
+                            onClick={() => handleToggleEpisode(ep)}
+                            aria-pressed={ep.watched}
+                            className={`flex min-h-[52px] min-w-0 flex-1 items-center justify-between gap-3 rounded-lg border px-3.5 py-2.5 text-left transition-colors ${
+                              ep.watched
+                                ? "border-[#22252D] bg-[#1A1D24]"
+                                : isNext
+                                  ? "border-[#F47521]/60 bg-[#0B0C0E]"
+                                  : "border-[#22252D] bg-[#0B0C0E] hover:border-[#2E323D]"
+                            }`}
                           >
-                            {isMarkingUpTo ? "..." : "Até aqui"}
+                            <div className="flex min-w-0 items-center gap-3">
+                              <span
+                                className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md border font-mono text-xs font-semibold ${
+                                  ep.watched
+                                    ? "border-[#F47521] bg-[#F47521] text-[#0B0C0E]"
+                                    : "border-[#22252D] bg-[#131519] text-[#9CA3AF]"
+                                }`}
+                                aria-hidden="true"
+                              >
+                                {ep.watched ? (
+                                  <Check className="h-4 w-4" />
+                                ) : (
+                                  absNumber
+                                )}
+                              </span>
+
+                              {ep.thumbnail && (
+                                <img
+                                  src={ep.thumbnail}
+                                  alt=""
+                                  width={96}
+                                  height={54}
+                                  loading="lazy"
+                                  className="hidden h-10 w-16 shrink-0 rounded border border-[#22252D] object-cover sm:block"
+                                />
+                              )}
+
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-xs font-semibold text-[#F3F4F6]">
+                                    {formatSeasonEpisodeLabel(ep.season, ep.episode)}
+                                  </span>
+                                  <span className="font-mono text-xs text-[#9CA3AF]">
+                                    #{String(absNumber).padStart(2, "0")}
+                                  </span>
+                                  {isNext && !ep.watched && (
+                                    <span className="rounded bg-[#F47521] px-1.5 py-0.5 text-[10px] font-semibold text-[#0B0C0E]">
+                                      Próximo
+                                    </span>
+                                  )}
+                                  {ep.is_upcoming && (
+                                    <span className="rounded border border-[#22252D] bg-[#131519] px-1.5 py-0.5 text-[10px] font-medium text-[#9CA3AF]">
+                                      {ep.air_date || ep.aired_at
+                                        ? `Lança em ${formatReleaseDatePt(ep.air_date || ep.aired_at)}`
+                                        : "Em breve"}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="truncate text-sm font-medium text-[#F3F4F6]">
+                                  {ep.title || `Episódio ${ep.episode}`}
+                                </p>
+                                {(ep.watched_at ||
+                                  ep.air_date ||
+                                  ep.aired_at ||
+                                  (ep.position_sec != null &&
+                                    ep.duration_sec != null &&
+                                    ep.duration_sec > 0)) && (
+                                  <p className="text-[11px] text-[#9CA3AF]">
+                                    {ep.watched_at
+                                      ? `Assistido em ${formatAbsoluteTimePt(ep.watched_at)}`
+                                      : (ep.air_date || ep.aired_at) &&
+                                          !ep.is_upcoming
+                                        ? `Lançado em ${formatReleaseDatePt(ep.air_date || ep.aired_at)}`
+                                        : ep.is_upcoming &&
+                                            (ep.air_date || ep.aired_at)
+                                          ? `Previsão: ${formatReleaseDatePt(ep.air_date || ep.aired_at, true)}`
+                                          : ""}
+                                    {ep.position_sec != null &&
+                                    ep.duration_sec != null &&
+                                    ep.duration_sec > 0
+                                      ? ` · ${formatTimecode(ep.position_sec)} / ${formatTimecode(ep.duration_sec)}`
+                                      : ""}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+
+                            <span className="shrink-0 text-xs font-medium text-[#9CA3AF]">
+                              {isBusy
+                                ? "..."
+                                : ep.watched
+                                  ? "Assistido"
+                                  : "Marcar"}
+                            </span>
                           </button>
-                        )}
+
+                          {!ep.is_upcoming && (
+                            <button
+                              type="button"
+                              disabled={isBusy || isMarkingUpTo}
+                              onClick={() => handleMarkUpToEpisode(ep)}
+                              aria-label={`Marcar até ${formatSeasonEpisodeLabel(ep.season, ep.episode)} como assistidos`}
+                              className="inline-flex min-h-[52px] shrink-0 items-center justify-center rounded-lg border border-[#22252D] bg-[#0B0C0E] px-2.5 text-xs font-medium text-[#9CA3AF] transition-colors hover:border-[#2E323D] hover:text-[#F3F4F6] disabled:opacity-60"
+                            >
+                              {isMarkingUpTo ? "..." : "Marcar até aqui"}
+                            </button>
+                          )}
+                        </div>
                       </li>
                     );
                   })}

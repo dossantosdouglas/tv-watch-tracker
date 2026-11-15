@@ -36,6 +36,7 @@ export interface WatchedEpisode {
 export interface CatalogEpisode {
   season: number;
   episode: number;
+  abs_episode?: number;
   title: string | null;
   aired_at: string | null;
   air_date?: string | null;
