@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-plus-jakarta), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, monospace;
+
+  --color-cinema-bg: #0b0c10;
+  --color-cinema-surface: #13151c;
+  --color-cinema-elevated: #1b1e28;
+  --color-cinema-border: #262a38;
+  --color-cinema-border-strong: #373d52;
+  --color-cinema-text: #f4f5f7;
+  --color-cinema-muted: #a8b0c2;
+  --color-crunchy-orange: #f47521;
+  --color-crunchy-orange-hover: #ff8b3d;
+  --color-youcine-crimson: #be123c;
+  --color-youcine-rose: #fda4af;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    background-color: #0b0c10;
+    color: #f4f5f7;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: #0b0c10;
+    color: #f4f5f7;
+    font-family: var(--font-sans);
+    overflow-x: clip;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a[href],
+  button,
+  summary,
+  select,
+  label[for],
+  label:has(> input[type="checkbox"], > input[type="radio"]),
+  [role="button"],
+  [role="link"],
+  [role="tab"],
+  [role="menuitem"],
+  [role="option"],
+  [role="switch"],
+  input[type="checkbox"],
+  input[type="radio"],
+  input[type="file"],
+  input[type="submit"],
+  input[type="button"],
+  input[type="reset"] {
+    cursor: pointer;
+  }
+
+  :disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  :focus-visible {
+    outline: 2px solid #f47521;
+    outline-offset: 2px;
+  }
+}
+
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 1rem;
+  z-index: 100;
+  background-color: #f47521;
+  color: #0b0c10;
+  font-weight: 700;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  transition: top 150ms ease;
+}
+
+.skip-link:focus {
+  top: 1rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

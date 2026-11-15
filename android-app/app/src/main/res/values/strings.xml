@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TV Watch Tracker</string>
+    <string name="accessibility_service_label">TV Watch Tracker (Captura)</string>
+    <string name="accessibility_service_description">Monitora automaticamente o título e episódio assistidos no Crunchyroll e YouCine para registrar seu histórico no TV Watch Tracker.</string>
+    <string name="media_listener_service_label">TV Watch Tracker (MediaSession)</string>
+</resources>
